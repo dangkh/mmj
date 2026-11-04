@@ -108,7 +108,10 @@ class FREEDOM(GeneralRecommender):
                              [1] * inter_M.nnz))
         data_dict.update(dict(zip(zip(inter_M_t.row + self.n_users, inter_M_t.col),
                                   [1] * inter_M_t.nnz)))
-        A._update(data_dict)
+        # mmj: dok_matrix._update was removed in recent SciPy; same matrix built via COO
+        _keys = np.array(list(data_dict.keys()), dtype=np.int64)
+        A = sp.coo_matrix((np.fromiter(data_dict.values(), dtype=np.float32, count=len(data_dict)),
+                           (_keys[:, 0], _keys[:, 1])), shape=A.shape).todok()
         # norm adj matrix
         sumArr = (A > 0).sum(axis=1)
         # add epsilon to avoid Devide by zero Warning

@@ -16,7 +16,10 @@ existing models (DRAGON, FREEDOM, MGCN, LATTICE, ...), then fix the bottleneck (
 | `tools/probe_rec.py` | recommendation probe on frozen representations (CPU) |
 | `scripts/` | PBS jobs (max 4 at a time), data setup, result collection |
 
-Model code in `src/models/` is unchanged.
+Model code in `src/models/` is unchanged except for library compatibility:
+`dok_matrix._update` (removed in recent SciPy) replaced by an identical COO construction in
+`common/encoders.py` and bm3/damrs/freedom/layergcn/lgmrec/lightgcn/pgl, and `np.float` (removed
+in NumPy 1.24) replaced by `np.float64` in `utils/metrics.py`.
 
 ## Taps
 
