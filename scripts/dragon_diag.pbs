@@ -1,0 +1,27 @@
+#!/bin/bash
+#PBS -N dragon_diag
+#PBS -q small_gpuq
+#PBS -l select=1:ncpus=4:ngpus=1:mem=32gb
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#
+# DRAGON diagnosis in one job: train with taps (GPU), then the kNN probe and the T2 graph control (CPU).
+#   qsub scripts/dragon_diag.pbs
+#   qsub -v DATASET=sports,EXP=dragon_taps scripts/dragon_diag.pbs
+# Skips training if taps/DRAGON-<dataset>-<EXP>/P_v.npy already exists.
+
+cd "$PBS_O_WORKDIR" || exit 1
+source "$HOME/miniconda3/etc/profile.d/conda.sh"
+conda activate "${CONDA_ENV:-Astar}"
+DATASET="${DATASET:-baby}"
+EXP="${EXP:-dragon_taps}"
+TAPS="taps/DRAGON-${DATASET}-${EXP}"
+echo "Job $PBS_JOBID on $(hostname): DRAGON $DATASET -> $TAPS"
+
+if [ ! -f "$TAPS/P_v.npy" ]; then
+    (cd src && python -u main.py -m DRAGON -d "$DATASET" --exp_name="$EXP" \
+        --learning_rate=0.0001 --reg_weight=0.001 --seed=999 --save_taps=True) || { echo "training failed"; exit 1; }
+fi
+python -u tools/probe_knn.py -d "$DATASET" --taps "$TAPS" --no_raw --tag "DRAGON_${EXP}"
+python -u tools/graph_control.py -d "$DATASET" --taps "$TAPS"
+echo "done: log/probe_knn_${DATASET}_DRAGON_${EXP}.json  log/graph_control_${DATASET}_DRAGON-${DATASET}-${EXP}.json"
