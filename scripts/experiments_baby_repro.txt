@@ -13,16 +13,17 @@
 # DRAGON: official README setting for Baby (lr 1e-4, reg 1e-3). Needs data/baby/user_graph_dict.npy.
 dragon_paper    DRAGON    --learning_rate=0.0001 --reg_weight=0.001 --seed=999 --save_taps=True
 
+# [dropped for now: MGCN and LATTICE gave NaN at epoch 0 on this data]
 # MGCN: the official grid is only cl_loss in {0.001, 0.01, 0.1} (lr 1e-3, reg 1e-4, k=10 fixed).
-mgcn_grid       MGCN      --seed=999 --save_taps=True
+# mgcn_grid     MGCN      --seed=999 --save_taps=True
 
 # FREEDOM: no published best; the official grid is small (dropout {0.8,0.9} x reg {0,1e-5,1e-4,1e-3}).
 freedom_grid    FREEDOM   --seed=999 --save_taps=True
 
 # LATTICE: defaults of the official code (lr 5e-4, embedding decay 1e-5) + two neighbours.
-lattice_paper   LATTICE   --learning_rate=0.0005 --reg_weight=1e-05 --seed=999 --save_taps=True
-lattice_n1      LATTICE   --learning_rate=0.0005 --reg_weight=0.0001 --seed=999 --save_taps=True
-lattice_n2      LATTICE   --learning_rate=0.001 --reg_weight=1e-05 --seed=999 --save_taps=True
+# lattice_paper   LATTICE   --learning_rate=0.0005 --reg_weight=1e-05 --seed=999 --save_taps=True
+# lattice_n1      LATTICE   --learning_rate=0.0005 --reg_weight=0.0001 --seed=999 --save_taps=True
+# lattice_n2      LATTICE   --learning_rate=0.001 --reg_weight=1e-05 --seed=999 --save_taps=True
 
 # LightGCN: ID-only reference (also the collaborative reference Y for the probes).
 lightgcn_l3     LightGCN  --n_layers=3 --reg_weight=0.0001 --seed=999 --save_taps=True

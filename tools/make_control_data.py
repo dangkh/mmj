@@ -2,8 +2,12 @@
 """
 Build a control copy of a dataset in which one modality carries no item-specific content:
 
-    perm  : feature rows shuffled across items (same feature distribution, wrong item)
-    noise : Gaussian rows with the same per-dimension mean / std (no real structure at all)
+    perm  : feature rows shuffled across items (same distribution, still item-unique, wrong item)
+    noise : Gaussian rows with the same per-dimension mean / std (item-unique, no real structure)
+    const : every row = the mean feature vector (no content and no item identity)
+
+real - perm  = what the CONTENT contributes;  perm - const = what the features contribute only as
+an item IDENTITY (memorisation by the trained projection).
 
 Everything else (interactions, the other modality, user graph) is linked unchanged, and the
 copy gets its own folder, so its cached item-item graphs are rebuilt from the control features.
@@ -27,7 +31,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('-d', '--dataset', default='baby')
     ap.add_argument('--modality', choices=['v', 't'], default='v')
-    ap.add_argument('--mode', choices=['perm', 'noise'], default='perm')
+    ap.add_argument('--mode', choices=['perm', 'noise', 'const'], default='perm')
     ap.add_argument('--data_dir', default='data')
     ap.add_argument('--config_dir', default='src/configs/dataset')
     ap.add_argument('--seed', type=int, default=2026)
@@ -61,8 +65,10 @@ def main():
         perm = rng.permutation(X.shape[0])
         Y = X[perm]
         np.save(os.path.join(dst, 'perm_index.npy'), perm)
-    else:
+    elif args.mode == 'noise':
         Y = (rng.standard_normal(X.shape) * X.std(0) + X.mean(0)).astype(np.float32)
+    else:   # const: mean vector (not zeros: zero rows make cosine/normalisation undefined in some models)
+        Y = np.tile(X.mean(0, keepdims=True), (X.shape[0], 1)).astype(np.float32)
     out = os.path.join(dst, target)
     if os.path.lexists(out):
         os.remove(out)

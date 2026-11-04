@@ -101,3 +101,9 @@ class GeneralRecommender(AbstractRecommender):
                     self.device)
 
             assert self.v_feat is not None or self.t_feat is not None, 'Features all NONE'
+            # mmj: upstream silently drops a modality whose file is missing (the model then runs
+            # image-only or text-only). Fail instead, unless explicitly allowed.
+            missing = [p for p, f in ((v_feat_file_path, self.v_feat), (t_feat_file_path, self.t_feat)) if f is None]
+            if missing and not config['allow_missing_modality']:
+                raise FileNotFoundError('feature file(s) not found: {} (pass --allow_missing_modality=True '
+                                        'to run with one modality)'.format(missing))

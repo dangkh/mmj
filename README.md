@@ -13,7 +13,8 @@ existing models (DRAGON, FREEDOM, MGCN, LATTICE, ...), then fix the bottleneck (
 | `src/utils/logger.py` | log name `src/log/<MODEL>-<dataset>-<exp_name>-<time>.log` |
 | `src/common/trainer.py` | `--save_taps=True` saves representations at every best-valid epoch |
 | `src/taps.py` | tap adapters for DRAGON, FREEDOM, MGCN, LATTICE, LightGCN |
-| `tools/probe_rec.py` | recommendation probe on frozen representations (CPU) |
+| `tools/probe_knn.py` | main probe: parameter-free item-kNN on a frozen representation (CPU) |
+| `tools/probe_rec.py` | optional learned probe (two-sided ridge), appendix only |
 | `scripts/` | PBS jobs (max 4 at a time), data setup, result collection |
 
 Model code in `src/models/` is unchanged except for library compatibility:
@@ -60,8 +61,11 @@ python scripts/collect_results.py -d baby --combos                            # 
 ```bash
 qsub -v DATASET=baby scripts/probe.pbs                                       # T0 (raw), no training needed
 qsub -v DATASET=baby,TAPS=taps/DRAGON-baby-dragon_paper scripts/probe.pbs     # taps of a trained model
+python tools/probe_knn.py -d baby --taps taps/MGCN-baby-mgcn_grid/combo1      # interactively (~1 min)
 ```
 
-Warm-mode numbers are only comparable at the same dimension (`--warm_dim`, default 64): with d
-dimensions the probe can learn a rank-d item-item model even from noise, so read them relative to
-the `null64` row. Cold mode (unseen items) cannot memorise and is the cleaner content measure.
+score(u,i) = sum over the user's train items j of cosine-kNN(j, i): nothing is fitted (only the
+neighbourhood size, chosen on valid), so there is no capacity/dimension difference between taps,
+no loss over unobserved zeros and no memorisation (null64 is at chance). Same test protocol as MMRec.
+The ridge probe (`tools/probe_rec.py`) learns a readout W and can learn CF even from noise in its
+warm mode; keep it for the appendix only.
