@@ -14,6 +14,12 @@
 #                                FREEDOM fine-tunes its feature table anyway
 #   const_rg <ds>_vconst_rg      const branch but the REAL item-item graph (cache copied)
 #   txtgraph <ds>_vcopy          real branch, item-item graph from text only (--mm_image_weight=0.0)
+# Text-graph versions: the item-item graph is built from TEXT ONLY (--mm_image_weight=0.0) in all of
+# them, so only the modality branch differs (each has its own folder = its own graph cache):
+#   real_tg  <ds>_vcopy        real image branch         perm_tg  <ds>_vperm_tg   wrong image
+#   noise_tg <ds>_vnoise_tg    fixed random vectors      const_tg <ds>_vconst_tg  same vector for every item
+#   id_tg    <ds>_vnoise64_tg  learnable 64-d item-ID table, random init with the usual Xavier scale
+#            (std ~ sqrt(2/(n_items+64)) ~ 0.017), DRAGON --learn_v_feat=True
 # Tasks of the same data folder go to the same job (they share the graph cache), started 2 min apart.
 # Finished steps are skipped, so re-running this script only submits what is missing.
 set -euo pipefail
@@ -36,13 +42,11 @@ mk "${DS}_vnoise"   --mode noise
 mk "${DS}_vconst"   --mode const
 mk "${DS}_vnoise64" --mode noise --dim 64
 mk "${DS}_vcopy"    --mode copy
-if [ ! -d "data/${DS}_vconst_rg" ]; then
-    if ls data/"$DS"/*adj*.pt >/dev/null 2>&1; then
-        python tools/make_control_data.py -d "$DS" --modality v --mode const --suffix _rg --reuse_graph
-    else
-        echo "WARNING: no cached graph in data/$DS yet (train DRAGON/FREEDOM on $DS once); skipping const_rg"
-    fi
-fi
+mk "${DS}_vperm_tg"    --mode perm  --suffix _tg
+mk "${DS}_vnoise_tg"   --mode noise --suffix _tg
+mk "${DS}_vconst_tg"   --mode const --suffix _tg
+XAV=$(python -c "import numpy as np; n=np.load('data/${DS}/image_feat.npy', mmap_mode='r').shape[0]; print('%.4f' % (2.0 / (n + 64)) ** 0.5)")
+mk "${DS}_vnoise64_tg" --mode noise --dim 64 --scale "$XAV" --suffix _tg
 
 # ---- task list:  group  NAME MODEL DATASET SEED ARGS
 DRAGON_ARGS="--learning_rate=0.0001 --reg_weight=0.001"
@@ -52,13 +56,20 @@ for s in $SEEDS; do
     # DRAGON keeps the names of the seed-999 runs already done (dragon_taps, dragon_vid, dragon_txtgraph)
     if [ "$s" = "999" ]; then dn=dragon_taps; dv=dragon_vid; dt=dragon_txtgraph; else dn=dragon_s$s; dv=dragon_vid_s$s; dt=dragon_txtgraph_s$s; fi
     fn=freedom_s$s; ft=freedom_txtgraph_s$s
-    for d in "$DS" "${DS}_vperm" "${DS}_vnoise" "${DS}_vconst" "${DS}_vconst_rg"; do
+    for d in "$DS" "${DS}_vperm" "${DS}_vnoise" "${DS}_vconst"; do
         [ -d "data/$d" ] || continue
         echo "$d $dn DRAGON $d $s $DRAGON_ARGS"   >> "$TASKS"
         echo "$d $fn FREEDOM $d $s $FREEDOM_ARGS" >> "$TASKS"
     done
     echo "${DS}_vnoise64 $dv DRAGON ${DS}_vnoise64 $s $DRAGON_ARGS --learn_v_feat=True" >> "$TASKS"
     echo "${DS}_vnoise64 $fn FREEDOM ${DS}_vnoise64 $s $FREEDOM_ARGS"                  >> "$TASKS"
+    TG="--mm_image_weight=0.0"
+    for d in "${DS}_vperm_tg" "${DS}_vnoise_tg" "${DS}_vconst_tg"; do
+        echo "$d $dn DRAGON $d $s $DRAGON_ARGS $TG"   >> "$TASKS"
+        echo "$d $fn FREEDOM $d $s $FREEDOM_ARGS $TG" >> "$TASKS"
+    done
+    echo "${DS}_vnoise64_tg $dv DRAGON ${DS}_vnoise64_tg $s $DRAGON_ARGS $TG --learn_v_feat=True" >> "$TASKS"
+    echo "${DS}_vnoise64_tg $fn FREEDOM ${DS}_vnoise64_tg $s $FREEDOM_ARGS $TG"                  >> "$TASKS"
     echo "${DS}_vcopy $dt DRAGON ${DS}_vcopy $s $DRAGON_ARGS --mm_image_weight=0.0"    >> "$TASKS"
     echo "${DS}_vcopy $ft FREEDOM ${DS}_vcopy $s $FREEDOM_ARGS --mm_image_weight=0.0"  >> "$TASKS"
 done

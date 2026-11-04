@@ -43,6 +43,10 @@ def main():
     ap.add_argument('--data_dir', default='data')
     ap.add_argument('--config_dir', default='src/configs/dataset')
     ap.add_argument('--seed', type=int, default=2026)
+    ap.add_argument('--scale', type=float, default=None,
+                    help='noise mode only: std of the Gaussian rows (default: matched to the real features, or 1 '
+                         'with --dim). A small value (e.g. 0.01) with --learn_v_feat=True gives a learnable ID '
+                         'table that starts close to const and can grow item identity only if training wants it')
     ap.add_argument('--dim', type=int, default=None,
                     help='noise mode only: feature dimension (default: same as the real features). '
                          'Use e.g. --dim 64 with --learn_v_feat=True for a learnable 64-d item-ID branch')
@@ -82,7 +86,9 @@ def main():
         np.save(os.path.join(dst, 'perm_index.npy'), perm)
     elif args.mode == 'noise':
         if args.dim:
-            Y = rng.standard_normal((X.shape[0], args.dim)).astype(np.float32)
+            Y = (rng.standard_normal((X.shape[0], args.dim)) * (args.scale or 1.0)).astype(np.float32)
+        elif args.scale:
+            Y = (rng.standard_normal(X.shape) * args.scale + X.mean(0)).astype(np.float32)
         else:
             Y = (rng.standard_normal(X.shape) * X.std(0) + X.mean(0)).astype(np.float32)
     else:   # const: mean vector (not zeros: zero rows make cosine/normalisation undefined in some models)

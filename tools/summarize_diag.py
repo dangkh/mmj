@@ -21,9 +21,11 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'scripts'))
 from collect_results import parse_log   # noqa: E402
 
-CONDS = ['real', 'perm', 'noise', 'const', 'id', 'const_rg', 'txtgraph']
+CONDS = ['real', 'perm', 'noise', 'const', 'id',                       # full replacement (graph changes too)
+         'real_tg', 'perm_tg', 'noise_tg', 'const_tg', 'id_tg']          # text-only item graph, branch varies
 FOLDER = {'real': '{}', 'perm': '{}_vperm', 'noise': '{}_vnoise', 'const': '{}_vconst', 'id': '{}_vnoise64',
-          'const_rg': '{}_vconst_rg', 'txtgraph': '{}_vcopy'}
+          'real_tg': '{}_vcopy', 'perm_tg': '{}_vperm_tg', 'noise_tg': '{}_vnoise_tg',
+          'const_tg': '{}_vconst_tg', 'id_tg': '{}_vnoise64_tg'}
 TAPS = ['T1_v', 'T1_t', 'T1_v+T1_t', 'T2_v', 'T2_t', 'T2_v+T2_t', 'T2_cat', 'T3']
 GAINS = ['G[T1_v|T1_t]', 'G[T2_v|T2_t]']
 GC = [('v | content+users - noise+users', 'T2 v content'), ('v | content+users - content+0users', 'T2 v user-ID'),
@@ -32,11 +34,11 @@ GC = [('v | content+users - noise+users', 'T2 v content'), ('v | content+users -
 
 def run_name(model, cond, seed):
     if model == 'DRAGON':
-        base = {'id': 'dragon_vid', 'txtgraph': 'dragon_txtgraph'}.get(cond, 'dragon')
+        base = {'id': 'dragon_vid', 'id_tg': 'dragon_vid', 'real_tg': 'dragon_txtgraph'}.get(cond, 'dragon')
         if seed == 999:
-            return base if cond in ('id', 'txtgraph') else 'dragon_taps'
+            return base if cond in ('id', 'id_tg', 'real_tg') else 'dragon_taps'
         return '{}_s{}'.format(base, seed)
-    return ('freedom_txtgraph_s{}' if cond == 'txtgraph' else 'freedom_s{}').format(seed)
+    return ('freedom_txtgraph_s{}' if cond == 'real_tg' else 'freedom_s{}').format(seed)
 
 
 def latest_log(model, ds, name):
@@ -112,7 +114,7 @@ def main():
                  for s in args.seeds if data[(cond, s)].get('recall') is not None
                  and data[('real', s)].get('recall') is not None]
             st = stats(d)
-            t = st[0] / (st[1] / math.sqrt(st[2])) if st and st[2] > 1 and st[1] > 0 else float('nan')
+            t = st[0] / (st[1] / math.sqrt(st[2])) if st and st[2] > 1 and st[1] > 1e-9 else float('nan')
             have = [str(s) for s in args.seeds if data[(cond, s)].get('recall') is not None]
             print('{:<9s} {:>18s} {:>18s} {:>18s} {:>8s}  {}'.format(
                 cond, fmt(stats(r)), fmt(st, True) if cond != 'real' else '', fmt(stats(n)),
