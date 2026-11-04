@@ -36,8 +36,9 @@ def _dragon(m):
         # DRAGON feeds the raw features (m.v_feat) to its GCNs; image_embedding / image_trs are unused.
         if getattr(gcn, 'dim_latent', None):
             out['T1_' + mod] = gcn.MLP_1(F.leaky_relu(gcn.MLP(feat)))
-        rep, _ = gcn(getattr(m, 'edge_index_drop' + mod), m.edge_index, feat)   # same call as DRAGON.forward
+        rep, pref = gcn(getattr(m, 'edge_index_drop' + mod), m.edge_index, feat)   # same call as DRAGON.forward
         out['T2_' + mod] = rep[m.n_users:]
+        out['P_' + mod] = pref        # per-modality user preference (user-ID parameters), for tools/graph_control.py
     # result_embed is what full_sort_predict scores with (set by the last training forward)
     out['T3'] = m.result_embed[m.n_users:]
     out['T3_user'] = m.result_embed[:m.n_users]

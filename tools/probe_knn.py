@@ -22,7 +22,8 @@ neighbourhoods of a representation are behaviourally meaningful.
     python tools/probe_knn.py -d baby --rep my=path/Z.npy --ks 10,50
 
 Rows: every representation, pop (rank by train degree), null64 (Gaussian noise: chance).
-Gain rows: G[a|b] = p(a+b) - p(b) (what a adds to b's neighbourhoods).
+Gain rows: G[a|b] = p(a+b) - p(b) (what a adds to b's neighbourhoods), with a paired bootstrap
+95% CI over users ('*' = CI excludes 0).
 Output: printed table + log/probe_knn_<dataset>_<tag>.json
 """
 import argparse
@@ -100,7 +101,16 @@ def probe(parts, mats, ks, topk, weights=(0.5,)):
            'k_neighbours': int(k), 'valid_recall': float(vr)}
     if w is not None:
         out['w_first'] = float(w)
+    out['_r'] = r                      # per-user test recall (same user order for every row), for paired CIs
     return out
+
+
+def paired_ci(a, b, n=1000, seed=0):
+    """95% bootstrap CI of mean(a - b) over the same users."""
+    d = a - b
+    rng = np.random.default_rng(seed)
+    m = np.array([d[rng.integers(0, len(d), len(d))].mean() for _ in range(n)])
+    return float(np.percentile(m, 2.5)), float(np.percentile(m, 97.5))
 
 
 def probe_pop(mats, topk):
@@ -115,7 +125,8 @@ def main():
     ap.add_argument('-d', '--dataset', default='baby')
     ap.add_argument('--data_dir', default='data')
     ap.add_argument('--taps', default=None, help='taps folder written with --save_taps=True')
-    ap.add_argument('--rep', action='append', default=[], help='name=a.npy or name=a.npy+b.npy')
+    ap.add_argument('--rep', action='append', default=[],
+                    help='name=a.npy | name=a.npy+b.npy (weighted pair) | name=a.npy|b.npy (one concatenated vector)')
     ap.add_argument('--no_raw', action='store_true', help='skip the raw-feature (T0) rows')
     ap.add_argument('--ks', default='3,5,10,20,50,200', help='neighbourhood sizes, chosen on valid')
     ap.add_argument('--weights', default='0.1,0.3,0.5,0.7,0.9',
@@ -151,9 +162,14 @@ def main():
         for lvl in ('T0ft', 'T1', 'T1g', 'T2'):
             if lvl + '_v' in reps and lvl + '_t' in reps:
                 reps['{0}_v+{0}_t'.format(lvl)] = reps[lvl + '_v'] + reps[lvl + '_t']
+                # plain concatenation as ONE vector (how DRAGON forms its item before the item-item graph)
+                reps['{}_cat'.format(lvl)] = [np.hstack(reps[lvl + '_v'] + reps[lvl + '_t'])]
     for r in args.rep:
         name, spec = r.split('=', 1)
-        reps[name] = [np.load(p) for p in spec.split('+')]
+        if '|' in spec:     # a.npy|b.npy : concatenated into one vector
+            reps[name] = [np.hstack([np.load(p) for p in spec.split('|')])]
+        else:               # a.npy+b.npy : two parts, weighted cosine
+            reps[name] = [np.load(p) for p in spec.split('+')]
     for name, parts in reps.items():
         for P in parts:
             if P.shape[0] != n_items:
@@ -178,19 +194,24 @@ def main():
             a, b = name.split('+', 1)
             for x, y in ((a, b), (b, a)):
                 if y in results:
-                    derived['G[{}|{}]'.format(x, y)] = results[name]['recall'] - results[y]['recall']
+                    g = results[name]['recall'] - results[y]['recall']
+                    ci = paired_ci(results[name]['_r'], results[y]['_r'])
+                    derived['G[{}|{}]'.format(x, y)] = {'gain': g, 'ci': ci}
 
     print('\nitem-kNN probe, Recall@{k} / NDCG@{k} on test (95% CI over users)'.format(k=args.topk))
     for name, r in results.items():
         print('  {:<16s} {:.4f} [{:.4f},{:.4f}]   {:.4f}'.format(name, r['recall'], *r['recall_ci'], r['ndcg']))
     for key in sorted(derived):
-        print('  {:<30s} {:+.4f}'.format(key, derived[key]))
+        g = derived[key]
+        sig = '' if g['ci'][0] <= 0 <= g['ci'][1] else '  *'
+        print('  {:<30s} {:+.4f}  paired 95% CI [{:+.4f},{:+.4f}]{}'.format(key, g['gain'], *g['ci'], sig))
 
     os.makedirs(args.out_dir, exist_ok=True)
     tag = args.tag or (os.path.basename(os.path.normpath(args.taps)) if args.taps else 'T0')
     out = os.path.join(args.out_dir, 'probe_knn_{}_{}.json'.format(args.dataset, tag))
+    clean = {k: {kk: vv for kk, vv in v.items() if kk != '_r'} for k, v in results.items()}
     with open(out, 'w') as f:
-        json.dump({'args': vars(args), 'results': results, 'derived': derived}, f, indent=1)
+        json.dump({'args': vars(args), 'results': clean, 'derived': derived}, f, indent=1)
     print('\nSaved {} ({:.0f}s total)'.format(out, time() - t_start))
 
 
