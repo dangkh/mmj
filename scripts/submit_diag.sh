@@ -12,8 +12,6 @@
 #   const   <ds>_vconst          mean vector for every item         (no identity, no content)
 #   id      <ds>_vnoise64        64-d noise; DRAGON: --learn_v_feat=True (learnable item-ID branch);
 #                                FREEDOM fine-tunes its feature table anyway
-#   const_rg <ds>_vconst_rg      const branch but the REAL item-item graph (cache copied)
-#   txtgraph <ds>_vcopy          real branch, item-item graph from text only (--mm_image_weight=0.0)
 # Text-graph versions: the item-item graph is built from TEXT ONLY (--mm_image_weight=0.0) in all of
 # them, so only the modality branch differs (each has its own folder = its own graph cache):
 #   real_tg  <ds>_vcopy        real image branch         perm_tg  <ds>_vperm_tg   wrong image
