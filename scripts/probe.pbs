@@ -1,0 +1,26 @@
+#!/bin/bash
+#PBS -N mmj_probe
+#PBS -q smallq
+#PBS -l select=1:ncpus=8:mem=32gb
+#PBS -l walltime=04:00:00
+#PBS -j oe
+#
+# Recommendation probe on CPU.
+#   qsub -v DATASET=baby scripts/probe.pbs                                      # T0: raw features
+#   qsub -v DATASET=baby,TAPS=taps/FREEDOM-baby-freedom_grid/combo3 scripts/probe.pbs
+#   qsub -v DATASET=baby,TAPS=...,EXTRA="--modes warm" scripts/probe.pbs
+
+cd "$PBS_O_WORKDIR" || exit 1
+source "$HOME/miniconda3/etc/profile.d/conda.sh"
+conda activate "${CONDA_ENV:-Astar}"
+export OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8
+
+DATASET="${DATASET:-baby}"
+echo "Job ID: $PBS_JOBID  Node: $(hostname)  Dataset: $DATASET  Taps: ${TAPS:-<raw T0>}"
+if [ -n "${TAPS:-}" ]; then
+    # shellcheck disable=SC2086
+    python -u tools/probe_rec.py -d "$DATASET" --taps "$TAPS" --no_raw ${EXTRA:-}
+else
+    # shellcheck disable=SC2086
+    python -u tools/probe_rec.py -d "$DATASET" ${EXTRA:-}
+fi

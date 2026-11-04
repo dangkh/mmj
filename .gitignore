@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+src/log/
+log/
+taps/
+saved/
+src/saved/
+src/recommend_topk/
+data/
+results_*.csv
+*.o[0-9]*
