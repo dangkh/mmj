@@ -1,30 +1,48 @@
 #!/bin/bash
 #PBS -N mmj_wk
 #PBS -q small_gpuq
-#PBS -l select=1:ncpus=4:ngpus=1:mem=24gb
+#PBS -l select=1:ncpus=4:ngpus=1:mem=32gb
 #PBS -l walltime=08:00:00
 #PBS -j oe
 #
-# Runs, one after another, the experiments listed in TASK_FILE.
-# Each line:  NAME  MODEL  [--key=value ...]
+# Runs the experiments listed in TASK_FILE, PARALLEL of them at a time on the job's GPU
+# (default 2). Each line:  NAME  MODEL  [--key=value ...]
 # Submitted by scripts/submit_all.sh (which also sets the walltime for the whole list).
 # Experiments whose log already has a final BEST block are skipped, so re-submitting after a
 # walltime kill continues with what is left.
+# Console output of each experiment: <TASK_FILE dir>/<NAME>.out (the MMRec log is in src/log/).
 
 cd "$PBS_O_WORKDIR" || exit 1
 source "$HOME/miniconda3/etc/profile.d/conda.sh"
 conda activate "${CONDA_ENV:-Astar}"
 
 DATASET="${DATASET:-baby}"
+PARALLEL="${PARALLEL:-2}"
+STAGGER="${STAGGER:-120}"     # seconds between starts: lets the first run write the cached graphs
 [ -f "$TASK_FILE" ] || { echo "Task file not found: $TASK_FILE"; exit 1; }
+OUT_DIR="$(dirname "$TASK_FILE")"
+export OMP_NUM_THREADS=$(( ${NCPUS:-4} / PARALLEL > 0 ? ${NCPUS:-4} / PARALLEL : 1 ))
 
-echo "Job ID:  $PBS_JOBID"
-echo "Node:    $(hostname)"
-echo "Python:  $(which python)"
-echo "Tasks:   $TASK_FILE ($(grep -c . "$TASK_FILE") experiments)"
+echo "Job ID:   $PBS_JOBID"
+echo "Node:     $(hostname)"
+echo "Python:   $(which python)"
+echo "Tasks:    $TASK_FILE ($(grep -c . "$TASK_FILE") experiments, $PARALLEL at a time)"
 nvidia-smi
 
-N_OK=0; N_FAIL=0; N_SKIP=0
+run_one() {   # run_one NAME MODEL ARGS...
+    local NAME=$1 MODEL=$2; shift 2
+    echo "===== [$(date '+%F %T')] start $NAME : $MODEL $* (output: $OUT_DIR/$NAME.out) ====="
+    # shellcheck disable=SC2068
+    if (cd src && python -u main.py -m "$MODEL" -d "$DATASET" --exp_name="$NAME" $@ < /dev/null) > "$OUT_DIR/$NAME.out" 2>&1; then
+        echo "===== [$(date '+%F %T')] done   $NAME ====="
+    else
+        echo "===== [$(date '+%F %T')] FAILED $NAME (see $OUT_DIR/$NAME.out) ====="
+        tail -n 20 "$OUT_DIR/$NAME.out"
+        return 1
+    fi
+}
+
+N_START=0; N_SKIP=0; N_FAIL=0
 while IFS= read -r LINE || [ -n "$LINE" ]; do
     LINE=$(echo "$LINE" | tr -d '\r')
     [ -z "$LINE" ] && continue
@@ -36,14 +54,17 @@ while IFS= read -r LINE || [ -n "$LINE" ]; do
         echo "===== [skip] $NAME (finished log exists) ====="
         N_SKIP=$((N_SKIP + 1)); continue
     fi
-
-    echo "===== [$(date '+%F %T')] start $NAME : $MODEL $ARGS ====="
+    # wait for a free slot
+    while [ "$(jobs -rp | wc -l)" -ge "$PARALLEL" ]; do
+        wait -n || N_FAIL=$((N_FAIL + 1))
+    done
+    [ "$N_START" -gt 0 ] && sleep "$STAGGER"
     # shellcheck disable=SC2086
-    if (cd src && python -u main.py -m "$MODEL" -d "$DATASET" --exp_name="$NAME" $ARGS < /dev/null); then
-        N_OK=$((N_OK + 1)); echo "===== [$(date '+%F %T')] done  $NAME ====="
-    else
-        N_FAIL=$((N_FAIL + 1)); echo "===== [$(date '+%F %T')] FAILED $NAME (continuing) ====="
-    fi
+    run_one "$NAME" "$MODEL" $ARGS &
+    N_START=$((N_START + 1))
 done < "$TASK_FILE"
 
-echo "Worker finished: ok=$N_OK failed=$N_FAIL skipped=$N_SKIP"
+while [ "$(jobs -rp | wc -l)" -gt 0 ]; do
+    wait -n || N_FAIL=$((N_FAIL + 1))
+done
+echo "Worker finished: started=$N_START failed=$N_FAIL skipped=$N_SKIP"
