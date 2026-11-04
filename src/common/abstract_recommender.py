@@ -107,3 +107,12 @@ class GeneralRecommender(AbstractRecommender):
             if missing and not config['allow_missing_modality']:
                 raise FileNotFoundError('feature file(s) not found: {} (pass --allow_missing_modality=True '
                                         'to run with one modality)'.format(missing))
+            # mmj: --learn_v_feat=True / --learn_t_feat=True turn the feature matrix into a free, trainable
+            # per-item table (initialised from the file). With a random file this is a learnable item-ID
+            # embedding in place of the modality: the "ID substitution" control. Only affects models that
+            # read self.v_feat / self.t_feat in forward (e.g. DRAGON); models using image_embedding
+            # (FREEDOM, LATTICE, MGCN) already fine-tune their copy.
+            if config['learn_v_feat'] and self.v_feat is not None:
+                self.v_feat = torch.nn.Parameter(self.v_feat.clone())
+            if config['learn_t_feat'] and self.t_feat is not None:
+                self.t_feat = torch.nn.Parameter(self.t_feat.clone())

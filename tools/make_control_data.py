@@ -14,6 +14,8 @@ copy gets its own folder, so its cached item-item graphs are rebuilt from the co
 
     python tools/make_control_data.py -d baby --modality v --mode perm     # -> data/baby_vperm
     python tools/make_control_data.py -d baby --modality v --mode noise    # -> data/baby_vnoise
+    python tools/make_control_data.py -d baby --modality v --mode noise --dim 64   # -> data/baby_vnoise64
+        then train with --learn_v_feat=True: the visual branch becomes a learnable item-ID embedding
 
 Train any model on it with  -d baby_vperm  (a dataset config src/configs/dataset/baby_vperm.yaml
 is written). Purpose: a model trained end-to-end can turn high-dimensional, item-unique features
@@ -35,10 +37,15 @@ def main():
     ap.add_argument('--data_dir', default='data')
     ap.add_argument('--config_dir', default='src/configs/dataset')
     ap.add_argument('--seed', type=int, default=2026)
+    ap.add_argument('--dim', type=int, default=None,
+                    help='noise mode only: feature dimension (default: same as the real features). '
+                         'Use e.g. --dim 64 with --learn_v_feat=True for a learnable 64-d item-ID branch')
     args = ap.parse_args()
 
     src = os.path.join(args.data_dir, args.dataset)
-    name = '{}_{}{}'.format(args.dataset, args.modality, args.mode)
+    name = '{}_{}{}{}'.format(args.dataset, args.modality, args.mode, args.dim or '')
+    if args.dim and args.mode != 'noise':
+        raise SystemExit('--dim only applies to --mode noise')
     dst = os.path.join(args.data_dir, name)
     os.makedirs(dst, exist_ok=True)
     feat = {'v': 'image_feat.npy', 't': 'text_feat.npy'}
@@ -66,7 +73,10 @@ def main():
         Y = X[perm]
         np.save(os.path.join(dst, 'perm_index.npy'), perm)
     elif args.mode == 'noise':
-        Y = (rng.standard_normal(X.shape) * X.std(0) + X.mean(0)).astype(np.float32)
+        if args.dim:
+            Y = rng.standard_normal((X.shape[0], args.dim)).astype(np.float32)
+        else:
+            Y = (rng.standard_normal(X.shape) * X.std(0) + X.mean(0)).astype(np.float32)
     else:   # const: mean vector (not zeros: zero rows make cosine/normalisation undefined in some models)
         Y = np.tile(X.mean(0, keepdims=True), (X.shape[0], 1)).astype(np.float32)
     out = os.path.join(dst, target)

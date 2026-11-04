@@ -8,6 +8,8 @@
 # DRAGON diagnosis in one job: train with taps (GPU), then the kNN probe and the T2 graph control (CPU).
 #   qsub scripts/dragon_diag.pbs
 #   qsub -v DATASET=sports,EXP=dragon_taps scripts/dragon_diag.pbs
+#   qsub -v DATASET=baby,EXP=dragon_s1,SEED=1 scripts/dragon_diag.pbs
+#   qsub -v DATASET=baby_vnoise64,EXP=dragon_vid,EXTRA_ARGS="--learn_v_feat=True" scripts/dragon_diag.pbs
 # Skips training if taps/DRAGON-<dataset>-<EXP>/P_v.npy already exists.
 
 cd "$PBS_O_WORKDIR" || exit 1
@@ -15,12 +17,14 @@ source "$HOME/miniconda3/etc/profile.d/conda.sh"
 conda activate "${CONDA_ENV:-Astar}"
 DATASET="${DATASET:-baby}"
 EXP="${EXP:-dragon_taps}"
+SEED="${SEED:-999}"
+EXTRA_ARGS="${EXTRA_ARGS:-}"
 TAPS="taps/DRAGON-${DATASET}-${EXP}"
-echo "Job $PBS_JOBID on $(hostname): DRAGON $DATASET -> $TAPS"
+echo "Job $PBS_JOBID on $(hostname): DRAGON $DATASET seed $SEED $EXTRA_ARGS -> $TAPS"
 
 if [ ! -f "$TAPS/P_v.npy" ]; then
     (cd src && python -u main.py -m DRAGON -d "$DATASET" --exp_name="$EXP" \
-        --learning_rate=0.0001 --reg_weight=0.001 --seed=999 --save_taps=True) || { echo "training failed"; exit 1; }
+        --learning_rate=0.0001 --reg_weight=0.001 --seed="$SEED" --save_taps=True $EXTRA_ARGS) || { echo "training failed"; exit 1; }
 fi
 python -u tools/probe_knn.py -d "$DATASET" --taps "$TAPS" --no_raw --tag "DRAGON_${EXP}"
 python -u tools/graph_control.py -d "$DATASET" --taps "$TAPS"
