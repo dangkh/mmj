@@ -5,6 +5,8 @@ Build a control copy of a dataset in which one modality carries no item-specific
     perm  : feature rows shuffled across items (same distribution, still item-unique, wrong item)
     noise : Gaussian rows with the same per-dimension mean / std (item-unique, no real structure)
     const : every row = the mean feature vector (no content and no item identity)
+    copy  : the real features unchanged (a clean copy with its own graph cache, e.g. to train with
+            --mm_image_weight=0.0 without touching the cache of the original folder)
 
 real - perm  = what the CONTENT contributes;  perm - const = what the features contribute only as
 an item IDENTITY (memorisation by the trained projection).
@@ -33,7 +35,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('-d', '--dataset', default='baby')
     ap.add_argument('--modality', choices=['v', 't'], default='v')
-    ap.add_argument('--mode', choices=['perm', 'noise', 'const'], default='perm')
+    ap.add_argument('--mode', choices=['perm', 'noise', 'const', 'copy'], default='perm')
+    ap.add_argument('--suffix', default='', help='appended to the folder name, e.g. _rg')
+    ap.add_argument('--reuse_graph', action='store_true',
+                    help="copy the original folder's cached item-item graphs (*adj*.pt) into the new one, so the "
+                         "model keeps the REAL item-item graph while the modality branch gets the control features")
     ap.add_argument('--data_dir', default='data')
     ap.add_argument('--config_dir', default='src/configs/dataset')
     ap.add_argument('--seed', type=int, default=2026)
@@ -43,7 +49,7 @@ def main():
     args = ap.parse_args()
 
     src = os.path.join(args.data_dir, args.dataset)
-    name = '{}_{}{}{}'.format(args.dataset, args.modality, args.mode, args.dim or '')
+    name = '{}_{}{}{}{}'.format(args.dataset, args.modality, args.mode, args.dim or '', args.suffix)
     if args.dim and args.mode != 'noise':
         raise SystemExit('--dim only applies to --mode noise')
     dst = os.path.join(args.data_dir, name)
@@ -68,7 +74,9 @@ def main():
 
     X = np.load(os.path.join(src, target)).astype(np.float32)
     rng = np.random.default_rng(args.seed)
-    if args.mode == 'perm':
+    if args.mode == 'copy':
+        Y = X
+    elif args.mode == 'perm':
         perm = rng.permutation(X.shape[0])
         Y = X[perm]
         np.save(os.path.join(dst, 'perm_index.npy'), perm)
@@ -84,6 +92,15 @@ def main():
         os.remove(out)
     np.save(out, Y)
     print('  wrote {} {} ({})'.format(out, Y.shape, args.mode))
+
+    if args.reuse_graph:
+        import glob
+        found = glob.glob(os.path.join(src, '*adj*.pt'))
+        if not found:
+            raise SystemExit('no cached graph (*adj*.pt) in {}: train the model once on {} first'.format(src, args.dataset))
+        for g in found:
+            shutil.copy(g, dst)
+            print('  copied real graph cache', os.path.basename(g))
 
     cfg_src = os.path.join(args.config_dir, '{}.yaml'.format(args.dataset))
     cfg_dst = os.path.join(args.config_dir, '{}.yaml'.format(name))
