@@ -2,7 +2,7 @@
 """
 Parameter-free recommendation probe: item-kNN on a frozen item representation Z.
 
-    sim(j, i)   = cosine(z_j, z_i)                     (for a pair of modalities: mean of the two cosines)
+    sim(j, i)   = cosine(z_j, z_i)                     (pair a+b: w*cos_a + (1-w)*cos_b, w chosen on valid)
     score(u, i) = sum_{j in history(u)} sim_k(j, i)    sim_k keeps the k nearest neighbours of j
 
 Nothing is fitted, so:
@@ -39,17 +39,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from probe_rec import load_data, boot_ci   # same data loading / CI as the ridge probe
 
 
-def cosine_sim(parts):
-    """Mean over parts of the cosine-similarity matrices (n x n, float32), diagonal removed."""
-    S = None
-    for P in parts:
-        P = P.astype(np.float32)
-        P = P / np.maximum(np.linalg.norm(P, axis=1, keepdims=True), 1e-12)
-        C = P @ P.T
-        S = C if S is None else S + C
-    S /= len(parts)
-    np.fill_diagonal(S, -np.inf)
-    return S
+def cosine(P):
+    P = P.astype(np.float32)
+    P = P / np.maximum(np.linalg.norm(P, axis=1, keepdims=True), 1e-12)
+    C = P @ P.T
+    np.fill_diagonal(C, -np.inf)
+    return C
 
 
 def topk_graph(S, k):
@@ -86,19 +81,26 @@ def evaluate(score_batch, R_hist, R_gt, R_mask, k=20, batch=4096):
     return rec, ndcg
 
 
-def probe(parts, mats, ks, topk):
+def probe(parts, mats, ks, topk, weights=(0.5,)):
+    """One part: cosine kNN. Two parts (v, t): sim = w*cos_v + (1-w)*cos_t, w and k chosen on valid."""
     R_tr, R_va, R_te = mats
-    S = cosine_sim(parts)
+    Cs = [cosine(P) for P in parts]
+    ws = weights if len(Cs) == 2 else (None,)
     best = None
-    for k in ks:
-        G = topk_graph(S, k)
-        r, _ = evaluate(lambda ub: (R_tr[ub] @ G).toarray(), R_tr, R_va, R_tr, topk)
-        if best is None or r.mean() > best[0]:
-            best = (r.mean(), k, G)
-    vr, k, G = best
+    for w in ws:
+        S = Cs[0] if w is None else w * Cs[0] + (1 - w) * Cs[1]
+        for k in ks:
+            G = topk_graph(S, k)
+            r, _ = evaluate(lambda ub: (R_tr[ub] @ G).toarray(), R_tr, R_va, R_tr, topk)
+            if best is None or r.mean() > best[0]:
+                best = (r.mean(), k, w, G)
+    vr, k, w, G = best
     r, n = evaluate(lambda ub: (R_tr[ub] @ G).toarray(), R_tr, R_te, R_tr, topk)
-    return {'recall': float(r.mean()), 'ndcg': float(n.mean()), 'recall_ci': boot_ci(r), 'ndcg_ci': boot_ci(n),
-            'k_neighbours': int(k), 'valid_recall': float(vr)}
+    out = {'recall': float(r.mean()), 'ndcg': float(n.mean()), 'recall_ci': boot_ci(r), 'ndcg_ci': boot_ci(n),
+           'k_neighbours': int(k), 'valid_recall': float(vr)}
+    if w is not None:
+        out['w_first'] = float(w)
+    return out
 
 
 def probe_pop(mats, topk):
@@ -115,13 +117,17 @@ def main():
     ap.add_argument('--taps', default=None, help='taps folder written with --save_taps=True')
     ap.add_argument('--rep', action='append', default=[], help='name=a.npy or name=a.npy+b.npy')
     ap.add_argument('--no_raw', action='store_true', help='skip the raw-feature (T0) rows')
-    ap.add_argument('--ks', default='10,50,200', help='neighbourhood sizes, chosen on valid')
+    ap.add_argument('--ks', default='3,5,10,20,50,200', help='neighbourhood sizes, chosen on valid')
+    ap.add_argument('--weights', default='0.1,0.3,0.5,0.7,0.9',
+                    help='for a pair a+b: weight of a in w*cos_a + (1-w)*cos_b, chosen on valid '
+                         '(the models use 0.1 image + 0.9 text)')
     ap.add_argument('--topk', type=int, default=20)
     ap.add_argument('--seed', type=int, default=2026)
     ap.add_argument('--tag', default=None)
     ap.add_argument('--out_dir', default='log')
     args = ap.parse_args()
     ks = [int(x) for x in args.ks.split(',')]
+    weights = [float(x) for x in args.weights.split(',')]
 
     t_start = time()
     ddir = os.path.join(args.data_dir, args.dataset)
@@ -158,12 +164,13 @@ def main():
                                                          results['pop']['ndcg'], k=args.topk))
     for name, parts in reps.items():
         t0 = time()
-        res = probe(parts, mats, ks, args.topk)
+        res = probe(parts, mats, ks, args.topk, weights)
         res['dims'] = [int(P.shape[1]) for P in parts]
         res['seconds'] = round(time() - t0, 1)
         results[name] = res
-        print('[knn] {:<14s} R@{k}={:.4f} N@{k}={:.4f}  k_nb={} ({:.0f}s)'.format(
-            name, res['recall'], res['ndcg'], res['k_neighbours'], res['seconds'], k=args.topk))
+        print('[knn] {:<14s} R@{k}={:.4f} N@{k}={:.4f}  k_nb={}{} ({:.0f}s)'.format(
+            name, res['recall'], res['ndcg'], res['k_neighbours'],
+            '  w_first={}'.format(res['w_first']) if 'w_first' in res else '', res['seconds'], k=args.topk))
 
     derived = {}
     for name in results:
