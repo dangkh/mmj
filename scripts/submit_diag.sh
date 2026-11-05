@@ -3,6 +3,7 @@
 #
 #   bash scripts/submit_diag.sh sports clothing baby          # default models / conditions / seeds
 #   MODELS="MENTOR" bash scripts/submit_diag.sh baby
+#   MODELS="COHESION LGMRec" bash scripts/submit_diag.sh baby   # Recall-only models (no tap adapter)
 #   CONDS="real perm noise const real_tg const_tg" bash scripts/submit_diag.sh sports
 #   DRY_RUN=1 bash scripts/submit_diag.sh sports              # show the split, submit nothing
 #
@@ -36,6 +37,9 @@ HOURS_PER_TASK="${HOURS_PER_TASK:-2}"
 CONDA_ENV="${CONDA_ENV:-Astar}"
 DRY_RUN="${DRY_RUN:-0}"
 MAX_WALLTIME_H="${MAX_WALLTIME_H:-48}"   # queue limit
+TAPPED=" DRAGON DRAGONID FREEDOM MENTOR LightGCN "   # models with a tap adapter (src/taps.py); others: Recall only
+# reduced tuning grid for models whose official grid is too large (COHESION: 64 combinations)
+COHESION_GRID="${COHESION_GRID:---learning_rate=[0.001,0.0001] --reg_weight=[0.01,0.001] --num_layer=[2,3]}"
 
 folder() {   # folder <ds> <cond>
     case "$2" in
@@ -82,6 +86,7 @@ echo "tasks in your active jobs: $(wc -l < "$BUSY")"
 done_task() {   # done_task <model> <ds> <name>
     grep -l 'BEST ████' src/log/"$1-$2-$3"-*.log >/dev/null 2>&1 || return 1
     case "$3" in *_grid) return 0 ;; esac
+    [[ "$TAPPED" == *" $1 "* ]] || return 0
     [ -f "log/probe_knn_$2_$1_$3.json" ] || return 1
     if [ "$1" = DRAGON ] || [ "$1" = MENTOR ]; then [ -f "log/graph_control_$2_$1-$2-$3.json" ] || return 1; fi
     return 0
@@ -100,15 +105,16 @@ for DS in $DATASETS; do
     for c in $CONDS; do make_folder "$DS" "$c"; done
     for M in $MODELS; do
         case "$M" in
-            DRAGON)  [ "$DS" = clothing ] && ARGS="--learning_rate=0.0001 --reg_weight=0.1" || ARGS="--learning_rate=0.0001 --reg_weight=0.001" ;;
-            FREEDOM|MENTOR)
+            DRAGON)  [[ "$DS" == clothing* ]] && ARGS="--learning_rate=0.0001 --reg_weight=0.1" || ARGS="--learning_rate=0.0001 --reg_weight=0.001" ;;
+            *)  # FREEDOM, MENTOR, COHESION, LGMRec, PGL, ...: tune on the real data first (selection on valid)
+                [ -f "src/configs/model/$M.yaml" ] || { echo "no config src/configs/model/$M.yaml"; exit 1; }
                 TUNE=$(echo "$M" | tr 'A-Z' 'a-z')_grid
+                TUNE_ARGS=""; [ "$M" = COHESION ] && TUNE_ARGS="$COHESION_GRID"
                 if ! ARGS=$(python tools/best_params.py "$M" "$DS" "$TUNE"); then
-                    echo "  $M on $DS: tuning first ($TUNE, official grid); re-run this script when it has finished"
-                    add "$DS" "$TUNE" "$M" "$DS" 999
+                    echo "  $M on $DS: tuning first ($TUNE ${TUNE_ARGS:-official grid}); re-run this script when it has finished"
+                    add "$DS" "$TUNE" "$M" "$DS" 999 $TUNE_ARGS
                     continue
                 fi ;;
-            *) echo "no fixed setting for model $M"; exit 1 ;;
         esac
         echo "  $M on $DS: $ARGS"
         for s in $SEEDS; do

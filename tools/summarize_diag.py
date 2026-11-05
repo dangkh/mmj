@@ -74,7 +74,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('-d', '--dataset', default='baby')
     ap.add_argument('--seeds', type=int, nargs='+', default=[999, 1, 2])
-    ap.add_argument('--models', nargs='+', default=['DRAGON', 'FREEDOM', 'MENTOR'])
+    ap.add_argument('--models', nargs='+', default=['DRAGON', 'FREEDOM', 'MENTOR', 'COHESION', 'LGMRec', 'PGL'])
     ap.add_argument('--csv', default=None)
     args = ap.parse_args()
 
@@ -108,6 +108,8 @@ def main():
                 data[(cond, seed)] = rec
                 rows.append(rec)
 
+        if not any(r.get('recall') is not None for r in data.values()):
+            continue                                   # model not run on this dataset
         print('\n' + '=' * 100 + '\n{} on {}   (mean±std over seeds; Δ = paired by seed vs real)'.format(model, args.dataset))
         print('{:<9s} {:>18s} {:>18s} {:>18s} {:>8s}  {}'.format('cond', 'test R@20', 'Δ R@20 vs ref', 'test N@20', 't', 'seeds'))
         print('(ref = real for the first block and for real_tg; ref = real_tg for the other *_tg rows, same text graph)')

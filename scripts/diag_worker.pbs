@@ -31,6 +31,8 @@ run_task() {   # run_task NAME MODEL DATASET SEED ARGS...
     echo "===== [$(date '+%F %T')] start $TAG (seed $SEED) $* ====="
     (
         TAPS_ARG="--save_taps=True"; case "$NAME" in *_grid) TAPS_ARG="" ;; esac
+        TAPPED=" DRAGON DRAGONID FREEDOM MENTOR LightGCN "
+        [[ "$TAPPED" == *" $MODEL "* ]] || TAPS_ARG=""      # no tap adapter: Recall only
         if grep -l 'BEST ████' src/log/"${MODEL}-${DS}-${NAME}"-*.log >/dev/null 2>&1; then
             echo "[train] skip (finished log exists)"
         else
@@ -39,6 +41,7 @@ run_task() {   # run_task NAME MODEL DATASET SEED ARGS...
                 || { echo "[train] FAILED"; exit 1; }
         fi
         case "$NAME" in *_grid) echo "[probe] tuning run: no probe"; exit 0 ;; esac
+        [ -z "$TAPS_ARG" ] && { echo "[probe] $MODEL has no tap adapter: Recall only"; exit 0; }
         if [ -f "log/probe_knn_${DS}_${MODEL}_${NAME}.json" ]; then
             echo "[probe] skip"
         else

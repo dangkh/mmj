@@ -1,0 +1,14 @@
+# COHESION (SIGIR 2025), official config from https://github.com/Jinfeng-Xu/COHESION (src/configs/model/COHESION.yaml)
+# The official grid is 4 x 4 x 4 = 64 combinations; scripts/submit_diag.sh tunes on a reduced grid
+# (COHESION_GRID) unless overridden.
+embedding_size: 64
+feat_embed_dim: 64
+n_mm_layers: 1
+n_layers: 2
+knn_k: 10
+mm_image_weight: 0.1
+learning_rate: [0.1, 0.01, 0.001, 0.0001]
+reg_weight: [0.1, 0.01, 0.001, 0.0001]
+dropout: [0]
+num_layer: [1, 2, 3, 4]
+hyper_parameters: ["reg_weight", "learning_rate", "dropout", "num_layer"]
