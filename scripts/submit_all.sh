@@ -62,7 +62,8 @@ echo "Dataset $DATASET | $N experiments from $CFG_FILE -> $W job(s) x $PARALLEL 
 for ((w = 0; w < W; w++)); do
     K=$(grep -c . "$QDIR/worker${w}.txt")
     if [ -n "$WALLTIME" ]; then WT="$WALLTIME"; else
-        WT=$(printf '%02d:00:00' $(( (K + PARALLEL - 1) / PARALLEL * HOURS_PER_EXP + 1 ))); fi
+        H=$(( (K + PARALLEL - 1) / PARALLEL * HOURS_PER_EXP + 1 )); [ "$H" -gt 48 ] && H=48
+        WT=$(printf '%02d:00:00' "$H"); fi
     VARS="TASK_FILE=$QDIR/worker${w}.txt,DATASET=${DATASET},CONDA_ENV=${CONDA_ENV},PARALLEL=${PARALLEL}"
     CMD=(qsub -N "mm${DATASET:0:2}_w${w}_${STAMP: -4}" -l "walltime=${WT}" -v "$VARS" scripts/run_worker.pbs)
     if [ "$DRY_RUN" = "1" ]; then echo "[dry-run] ${CMD[*]}"; JID="DRYRUN.w${w}"; else JID=$("${CMD[@]}"); fi

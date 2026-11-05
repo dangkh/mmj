@@ -1,106 +1,161 @@
 #!/bin/bash
-# Full content-vs-identity diagnosis for DRAGON and FREEDOM on one dataset, 3 seeds, in MAX_JOBS jobs.
+# Content-vs-identity diagnosis: MODELS x CONDS x SEEDS on one or more datasets, in at most MAX_JOBS jobs.
 #
-#   bash scripts/submit_diag.sh                 # baby, seeds 999 1 2, 4 jobs x 2 tasks in parallel
-#   DRY_RUN=1 bash scripts/submit_diag.sh       # print the task split only
-#   SEEDS="999 1 2 3 4" MAX_JOBS=4 bash scripts/submit_diag.sh sports
+#   bash scripts/submit_diag.sh sports clothing baby          # default models / conditions / seeds
+#   MODELS="MENTOR" bash scripts/submit_diag.sh baby
+#   CONDS="real perm noise const real_tg const_tg" bash scripts/submit_diag.sh sports
+#   DRY_RUN=1 bash scripts/submit_diag.sh sports              # show the split, submit nothing
 #
-# Conditions for the visual modality (data folders are created here if missing):
-#   real    data/<ds>            real image features
-#   perm    <ds>_vperm           image rows shuffled across items   (identity kept, content wrong)
-#   noise   <ds>_vnoise          Gaussian rows                      (identity kept, no content)
-#   const   <ds>_vconst          mean vector for every item         (no identity, no content)
-#   id      <ds>_vnoise64        64-d noise; DRAGON: --learn_v_feat=True (learnable item-ID branch);
-#                                FREEDOM fine-tunes its feature table anyway
-# Text-graph versions: the item-item graph is built from TEXT ONLY (--mm_image_weight=0.0) in all of
-# them, so only the modality branch differs (each has its own folder = its own graph cache):
-#   real_tg  <ds>_vcopy        real image branch         perm_tg  <ds>_vperm_tg   wrong image
-#   noise_tg <ds>_vnoise_tg    fixed random vectors      const_tg <ds>_vconst_tg  same vector for every item
-#   id_tg    <ds>_vnoise64_tg  learnable 64-d item-ID table, random init with the usual Xavier scale
-#            (std ~ sqrt(2/(n_items+64)) ~ 0.017), DRAGON --learn_v_feat=True
+# Two stages, both handled by re-running the same command:
+#   1. FREEDOM / MENTOR are first tuned on the real data with their official grid (name freedom_grid /
+#      mentor_grid, selection on valid). Their control runs are added once that tuning run has finished.
+#      DRAGON uses the official per-dataset setting (lr 1e-4; reg 1e-3, Clothing 0.1).
+#   2. Every condition x seed with the selected hyper-parameters.
+# Tasks that are finished, or listed in the task file of one of your queued/running jobs, are skipped,
+# so re-running is safe at any time.
+#
+# Conditions for the visual modality (data folders are created if missing):
+#   real     data/<ds>             real image features
+#   perm     <ds>_vperm            image rows shuffled across items   (identity kept, content wrong)
+#   noise    <ds>_vnoise           Gaussian rows                      (identity kept, no content)
+#   const    <ds>_vconst           mean vector for every item         (no identity, no content)
+#   id       <ds>_vnoise64         64-d noise; DRAGON/MENTOR --learn_v_feat=True
+#   real_tg  <ds>_vcopy            real images, item-item graph from text only (--mm_image_weight=0.0)
+#   perm_tg / noise_tg / const_tg / id_tg   same with the text-only item-item graph
 # Tasks of the same data folder go to the same job (they share the graph cache), started 2 min apart.
-# Finished steps are skipped, so re-running this script only submits what is missing.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-DS="${1:-baby}"
+DATASETS="${*:-baby}"
+MODELS="${MODELS:-DRAGON FREEDOM MENTOR}"
+CONDS="${CONDS:-real perm noise const real_tg}"
 SEEDS="${SEEDS:-999 1 2}"
 MAX_JOBS="${MAX_JOBS:-4}"
 PARALLEL="${PARALLEL:-2}"
-HOURS_PER_TASK="${HOURS_PER_TASK:-1}"
+HOURS_PER_TASK="${HOURS_PER_TASK:-2}"
 CONDA_ENV="${CONDA_ENV:-Astar}"
 DRY_RUN="${DRY_RUN:-0}"
+MAX_WALLTIME_H="${MAX_WALLTIME_H:-48}"   # queue limit
 
-[ -f "data/${DS}/${DS}.inter" ] || { echo "data/${DS} not set up"; exit 1; }
+folder() {   # folder <ds> <cond>
+    case "$2" in
+        real) echo "$1" ;;              perm) echo "$1_vperm" ;;        noise) echo "$1_vnoise" ;;
+        const) echo "$1_vconst" ;;      id) echo "$1_vnoise64" ;;       real_tg) echo "$1_vcopy" ;;
+        perm_tg) echo "$1_vperm_tg" ;;  noise_tg) echo "$1_vnoise_tg" ;; const_tg) echo "$1_vconst_tg" ;;
+        id_tg) echo "$1_vnoise64_tg" ;; *) echo "unknown condition $2" >&2; exit 1 ;;
+    esac
+}
+make_folder() {   # make_folder <ds> <cond>
+    local ds=$1 c=$2 f; f=$(folder "$ds" "$c")
+    [ "$c" = real ] && return 0
+    [ -d "data/$f" ] && [ -f "src/configs/dataset/$f.yaml" ] && return 0
+    case "$c" in
+        perm|noise|const) python tools/make_control_data.py -d "$ds" --modality v --mode "$c" ;;
+        id)       python tools/make_control_data.py -d "$ds" --modality v --mode noise --dim 64 ;;
+        real_tg)  python tools/make_control_data.py -d "$ds" --modality v --mode copy ;;
+        perm_tg|noise_tg|const_tg) python tools/make_control_data.py -d "$ds" --modality v --mode "${c%_tg}" --suffix _tg ;;
+        id_tg)    local xav; xav=$(python -c "import numpy as np; n=np.load('data/$ds/image_feat.npy', mmap_mode='r').shape[0]; print('%.4f' % (2.0 / (n + 64)) ** 0.5)")
+                  python tools/make_control_data.py -d "$ds" --modality v --mode noise --dim 64 --scale "$xav" --suffix _tg ;;
+    esac > /dev/null
+}
+run_name() {   # run_name <model> <cond> <seed>  (DRAGON on baby keeps the names of the first seed-999 runs)
+    local m=$1 c=$2 s=$3 low; low=$(echo "$m" | tr 'A-Z' 'a-z')
+    if [ "$m" = DRAGON ] && [ "$s" = 999 ]; then
+        case "$c" in id|id_tg) echo dragon_vid ;; real_tg) echo dragon_txtgraph ;; *) echo dragon_taps ;; esac; return
+    fi
+    case "$c" in
+        real_tg) echo "${low}_txtgraph_s$s" ;;
+        id|id_tg) [ "$m" = FREEDOM ] && echo "freedom_s$s" || echo "${low}_vid_s$s" ;;
+        *) echo "${low}_s$s" ;;
+    esac
+}
 
-# ---- control data folders
-mk() { [ -d "data/$1" ] && [ -f "src/configs/dataset/$1.yaml" ] || python tools/make_control_data.py -d "$DS" --modality v "${@:2}"; }
-mk "${DS}_vperm"    --mode perm
-mk "${DS}_vnoise"   --mode noise
-mk "${DS}_vconst"   --mode const
-mk "${DS}_vnoise64" --mode noise --dim 64
-mk "${DS}_vcopy"    --mode copy
-mk "${DS}_vperm_tg"    --mode perm  --suffix _tg
-mk "${DS}_vnoise_tg"   --mode noise --suffix _tg
-mk "${DS}_vconst_tg"   --mode const --suffix _tg
-XAV=$(python -c "import numpy as np; n=np.load('data/${DS}/image_feat.npy', mmap_mode='r').shape[0]; print('%.4f' % (2.0 / (n + 64)) ** 0.5)")
-mk "${DS}_vnoise64_tg" --mode noise --dim 64 --scale "$XAV" --suffix _tg
+# ---- tasks already handled by your queued / running jobs
+BUSY=$(mktemp)
+if command -v qstat >/dev/null 2>&1; then
+    for j in $(qstat -u "$USER" 2>/dev/null | awk '$1 ~ /^[0-9]+\./ {print $1}'); do
+        qstat -f "$j" 2>/dev/null | tr -d '\n\t ' | grep -o 'TASK_FILE=[^,]*' | cut -d= -f2
+    done | sort -u | while read -r tf; do [ -f "$tf" ] && cat "$tf"; done | awk '{print $2, $3, $1}' | sort -u > "$BUSY"
+fi
+echo "tasks in your active jobs: $(wc -l < "$BUSY")"
 
-# ---- task list:  group  NAME MODEL DATASET SEED ARGS
-DRAGON_ARGS="--learning_rate=0.0001 --reg_weight=0.001"
-FREEDOM_ARGS="--dropout=0.8 --reg_weight=0.001"
-TASKS=$(mktemp)
-for s in $SEEDS; do
-    # DRAGON keeps the names of the seed-999 runs already done (dragon_taps, dragon_vid, dragon_txtgraph)
-    if [ "$s" = "999" ]; then dn=dragon_taps; dv=dragon_vid; dt=dragon_txtgraph; else dn=dragon_s$s; dv=dragon_vid_s$s; dt=dragon_txtgraph_s$s; fi
-    fn=freedom_s$s; ft=freedom_txtgraph_s$s
-    for d in "$DS" "${DS}_vperm" "${DS}_vnoise" "${DS}_vconst"; do
-        [ -d "data/$d" ] || continue
-        echo "$d $dn DRAGON $d $s $DRAGON_ARGS"   >> "$TASKS"
-        echo "$d $fn FREEDOM $d $s $FREEDOM_ARGS" >> "$TASKS"
-    done
-    echo "${DS}_vnoise64 $dv DRAGON ${DS}_vnoise64 $s $DRAGON_ARGS --learn_v_feat=True" >> "$TASKS"
-    echo "${DS}_vnoise64 $fn FREEDOM ${DS}_vnoise64 $s $FREEDOM_ARGS"                  >> "$TASKS"
-    TG="--mm_image_weight=0.0"
-    for d in "${DS}_vperm_tg" "${DS}_vnoise_tg" "${DS}_vconst_tg"; do
-        echo "$d $dn DRAGON $d $s $DRAGON_ARGS $TG"   >> "$TASKS"
-        echo "$d $fn FREEDOM $d $s $FREEDOM_ARGS $TG" >> "$TASKS"
-    done
-    echo "${DS}_vnoise64_tg $dv DRAGON ${DS}_vnoise64_tg $s $DRAGON_ARGS $TG --learn_v_feat=True" >> "$TASKS"
-    echo "${DS}_vnoise64_tg $fn FREEDOM ${DS}_vnoise64_tg $s $FREEDOM_ARGS $TG"                  >> "$TASKS"
-    echo "${DS}_vcopy $dt DRAGON ${DS}_vcopy $s $DRAGON_ARGS --mm_image_weight=0.0"    >> "$TASKS"
-    echo "${DS}_vcopy $ft FREEDOM ${DS}_vcopy $s $FREEDOM_ARGS --mm_image_weight=0.0"  >> "$TASKS"
-done
+done_task() {   # done_task <model> <ds> <name>
+    grep -l 'BEST ████' src/log/"$1-$2-$3"-*.log >/dev/null 2>&1 || return 1
+    case "$3" in *_grid) return 0 ;; esac
+    [ -f "log/probe_knn_$2_$1_$3.json" ] || return 1
+    if [ "$1" = DRAGON ] || [ "$1" = MENTOR ]; then [ -f "log/graph_control_$2_$1-$2-$3.json" ] || return 1; fi
+    return 0
+}
 
-# drop tasks that are completely done
 TODO=$(mktemp)
-while read -r G NAME MODEL D SEED ARGS; do
-    done_train=0; grep -l 'BEST ████' src/log/"${MODEL}-${D}-${NAME}"-*.log >/dev/null 2>&1 && done_train=1
-    done_probe=0; [ -f "log/probe_knn_${D}_${MODEL}_${NAME}.json" ] && done_probe=1
-    done_gc=1; [ "$MODEL" = "DRAGON" ] && [ ! -f "log/graph_control_${D}_${MODEL}-${D}-${NAME}.json" ] && done_gc=0
-    if [ $done_train = 1 ] && [ $done_probe = 1 ] && [ $done_gc = 1 ]; then continue; fi
-    echo "$G $NAME $MODEL $D $SEED $ARGS" >> "$TODO"
-done < "$TASKS"
-N=$(grep -c . "$TODO" || true)
-[ "$N" -gt 0 ] || { echo "Everything is done."; exit 0; }
+add() {   # add <group> <name> <model> <ds> <seed> <args...>
+    local g=$1 n=$2 m=$3 d=$4 s=$5; shift 5
+    done_task "$m" "$d" "$n" && return 0
+    grep -qx "$m $d $n" "$BUSY" && return 0
+    echo "$g $n $m $d $s $*" >> "$TODO"
+}
 
-# ---- split by data folder (greedy: largest group to the least loaded job)
-STAMP=$(date '+%Y%m%d-%H%M%S'); QDIR="src/log/queue/diag-${DS}-${STAMP}"; mkdir -p "$QDIR"
+for DS in $DATASETS; do
+    [ -f "data/${DS}/${DS}.inter" ] || { echo "data/${DS} not set up (bash scripts/setup_data.sh ${DS})"; exit 1; }
+    for c in $CONDS; do make_folder "$DS" "$c"; done
+    for M in $MODELS; do
+        case "$M" in
+            DRAGON)  [ "$DS" = clothing ] && ARGS="--learning_rate=0.0001 --reg_weight=0.1" || ARGS="--learning_rate=0.0001 --reg_weight=0.001" ;;
+            FREEDOM|MENTOR)
+                TUNE=$(echo "$M" | tr 'A-Z' 'a-z')_grid
+                if ! ARGS=$(python tools/best_params.py "$M" "$DS" "$TUNE"); then
+                    echo "  $M on $DS: tuning first ($TUNE, official grid); re-run this script when it has finished"
+                    add "$DS" "$TUNE" "$M" "$DS" 999
+                    continue
+                fi ;;
+            *) echo "no fixed setting for model $M"; exit 1 ;;
+        esac
+        echo "  $M on $DS: $ARGS"
+        for s in $SEEDS; do
+            for c in $CONDS; do
+                d=$(folder "$DS" "$c"); n=$(run_name "$M" "$c" "$s"); extra=""
+                case "$c" in *_tg) extra="--mm_image_weight=0.0" ;; esac
+                case "$c" in id|id_tg) [ "$M" != FREEDOM ] && extra="$extra --learn_v_feat=True" ;; esac
+                add "$d" "$n" "$M" "$d" "$s" $ARGS $extra
+            done
+        done
+    done
+done
+rm -f "$BUSY"
+N=$(grep -c . "$TODO" || true)
+[ "$N" -gt 0 ] || { echo "Nothing to submit (all done or already queued)."; rm -f "$TODO"; exit 0; }
+
+# ---- split by data folder (largest group first, to the least loaded job)
+STAMP=$(date '+%Y%m%d-%H%M%S'); QDIR="src/log/queue/diag-${STAMP}"; mkdir -p "$QDIR"
 W=$(( N < MAX_JOBS ? N : MAX_JOBS ))
 declare -a LOAD; for ((w = 0; w < W; w++)); do LOAD[$w]=0; : > "$QDIR/worker$w.txt"; done
 for G in $(awk '{print $1}' "$TODO" | sort | uniq -c | sort -rn | awk '{print $2}'); do
     best=0; for ((w = 1; w < W; w++)); do [ "${LOAD[$w]}" -lt "${LOAD[$best]}" ] && best=$w; done
-    awk -v g="$G" '$1 == g {$1 = ""; sub(/^ /, ""); print}' "$TODO" | sort -k4,4n >> "$QDIR/worker$best.txt"
+    # tuning runs first (they unblock the second stage), then by seed
+    awk -v g="$G" '$1 == g {$1 = ""; sub(/^ /, ""); print}' "$TODO" | sort -k4,4n \
+        | awk '$1 ~ /_grid$/ {print; next} {rest[++n] = $0} END {for (i = 1; i <= n; i++) print rest[i]}' >> "$QDIR/worker$best.txt"
     LOAD[$best]=$(( LOAD[$best] + $(awk -v g="$G" '$1 == g' "$TODO" | wc -l) ))
 done
-rm -f "$TASKS" "$TODO"
+rm -f "$TODO"
 
-echo "Dataset $DS | seeds: $SEEDS | $N tasks -> $W job(s) x $PARALLEL in parallel | $QDIR"
+echo "Datasets: $DATASETS | models: $MODELS | conditions: $CONDS | seeds: $SEEDS"
+echo "$N tasks -> $W job(s) x $PARALLEL in parallel | $QDIR"
 for ((w = 0; w < W; w++)); do
     K=$(grep -c . "$QDIR/worker$w.txt" || true); [ "$K" -gt 0 ] || continue
-    WT=$(printf '%02d:00:00' $(( (K + PARALLEL - 1) / PARALLEL * HOURS_PER_TASK + 2 )))
-    CMD=(qsub -N "dg${DS:0:2}_w${w}" -l "walltime=${WT}" -v "TASK_FILE=$QDIR/worker$w.txt,CONDA_ENV=$CONDA_ENV,PARALLEL=$PARALLEL" scripts/diag_worker.pbs)
-    if [ "$DRY_RUN" = "1" ]; then echo "[dry-run] ${CMD[*]}"; JID=DRYRUN; else JID=$("${CMD[@]}"); fi
+    H=$(( (K + PARALLEL - 1) / PARALLEL * HOURS_PER_TASK + 2 ))
+    if [ "$H" -gt "$MAX_WALLTIME_H" ]; then
+        echo "  job $w: estimated ${H}h > ${MAX_WALLTIME_H}h limit, capped; unfinished tasks are picked up by re-running this script"
+        H=$MAX_WALLTIME_H
+    fi
+    WT=$(printf '%02d:00:00' "$H")
+    CMD=(qsub -N "diag_w${w}" -l "walltime=${WT}" -v "TASK_FILE=$QDIR/worker$w.txt,CONDA_ENV=$CONDA_ENV,PARALLEL=$PARALLEL" scripts/diag_worker.pbs)
+    if [ "$DRY_RUN" = "1" ]; then echo "[dry-run] ${CMD[*]}"; JID=DRYRUN
+    elif ! JID=$("${CMD[@]}" 2>&1); then
+        echo "${CMD[*]}" >> "$QDIR/pending.sh"
+        echo "  job $w NOT submitted ($JID); later: bash $QDIR/pending.sh"
+        continue
+    fi
     printf '  job %d (%s, %d tasks, walltime %s): %s\n' "$w" "$JID" "$K" "$WT" "$(awk '{printf "%s:%s:s%s ", $2, $3, $4}' "$QDIR/worker$w.txt")"
 done
-echo "Summary when done: python tools/summarize_diag.py -d $DS"
+[ -f "$QDIR/pending.sh" ] && echo "Some jobs are pending (queue limit). When slots are free: bash $QDIR/pending.sh"
+echo "Summary when done: python tools/summarize_diag.py -d <dataset>"

@@ -98,6 +98,7 @@ def _lightgcn(m):
 ADAPTERS = {
     'DRAGON': _dragon,
     'DRAGONID': _dragon,   # visual branch = item-ID table (src/models/dragonid.py)
+    'MENTOR': _dragon,     # same per-modality GCN as DRAGON (v_gcn / t_gcn, result_embed for scoring)
     'FREEDOM': _freedom,
     'LATTICE': _lattice,
     'MGCN': _mgcn,

@@ -33,12 +33,15 @@ GC = [('v | content+users - noise+users', 'T2 v content'), ('v | content+users -
 
 
 def run_name(model, cond, seed):
-    if model == 'DRAGON':
-        base = {'id': 'dragon_vid', 'id_tg': 'dragon_vid', 'real_tg': 'dragon_txtgraph'}.get(cond, 'dragon')
-        if seed == 999:
-            return base if cond in ('id', 'id_tg', 'real_tg') else 'dragon_taps'
-        return '{}_s{}'.format(base, seed)
-    return ('freedom_txtgraph_s{}' if cond == 'real_tg' else 'freedom_s{}').format(seed)
+    """Same naming as scripts/submit_diag.sh (DRAGON seed 999 keeps the names of the first runs)."""
+    if model == 'DRAGON' and seed == 999:
+        return {'id': 'dragon_vid', 'id_tg': 'dragon_vid', 'real_tg': 'dragon_txtgraph'}.get(cond, 'dragon_taps')
+    low = model.lower()
+    if cond == 'real_tg':
+        return '{}_txtgraph_s{}'.format(low, seed)
+    if cond in ('id', 'id_tg') and model != 'FREEDOM':
+        return '{}_vid_s{}'.format(low, seed)
+    return '{}_s{}'.format(low, seed)
 
 
 def latest_log(model, ds, name):
@@ -71,7 +74,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('-d', '--dataset', default='baby')
     ap.add_argument('--seeds', type=int, nargs='+', default=[999, 1, 2])
-    ap.add_argument('--models', nargs='+', default=['DRAGON', 'FREEDOM'])
+    ap.add_argument('--models', nargs='+', default=['DRAGON', 'FREEDOM', 'MENTOR'])
     ap.add_argument('--csv', default=None)
     args = ap.parse_args()
 
