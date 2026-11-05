@@ -79,10 +79,16 @@ run_name() {   # run_name <model> <cond> <seed>  (DRAGON on baby keeps the names
 
 # ---- tasks already handled by your queued / running jobs
 BUSY=$(mktemp)
+# Jobs without TASK_FILE (other projects) must not stop the script: under `set -e -o pipefail` a failing
+# grep / [ -f ] at the end of this pipeline used to exit silently. qselect gives full job ids
+# (qstat -u truncates them to e.g. 260219.hpc-hea*, which qstat -f does not accept).
 if command -v qstat >/dev/null 2>&1; then
-    for j in $(qstat -u "$USER" 2>/dev/null | awk '$1 ~ /^[0-9]+\./ {print $1}'); do
-        qstat -f "$j" 2>/dev/null | tr -d '\n\t ' | grep -o 'TASK_FILE=[^,]*' | cut -d= -f2
-    done | sort -u | while read -r tf; do [ -f "$tf" ] && cat "$tf"; done | awk '{print $2, $3, $1}' | sort -u > "$BUSY"
+    JOBS=$(qselect -u "$USER" 2>/dev/null || qstat -w -u "$USER" 2>/dev/null | awk '$1 ~ /^[0-9]+\./ {print $1}' || true)
+    for j in $JOBS; do
+        qstat -f "$j" 2>/dev/null | tr -d '\n\t ' | grep -o 'TASK_FILE=[^,]*' | cut -d= -f2 || true
+    done | sort -u | while read -r tf; do
+        if [ -f "$tf" ]; then cat "$tf"; fi
+    done | awk 'NF >= 3 {print $2, $3, $1}' | sort -u > "$BUSY" || true
 fi
 echo "tasks in your active jobs: $(wc -l < "$BUSY")"
 
