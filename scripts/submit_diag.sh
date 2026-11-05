@@ -6,6 +6,7 @@
 #   MODELS="COHESION LGMRec" bash scripts/submit_diag.sh baby   # Recall-only models (no tap adapter)
 #   CONDS="real perm noise const real_tg const_tg" bash scripts/submit_diag.sh sports
 #   DRY_RUN=1 bash scripts/submit_diag.sh sports              # show the split, submit nothing
+#   MEM=32gb PARALLEL=1 bash scripts/submit_diag.sh clothing    # resources per job (default 16gb, 4 cpus)
 #
 # Two stages, both handled by re-running the same command:
 #   1. FREEDOM / MENTOR are first tuned on the real data with their official grid (name freedom_grid /
@@ -37,6 +38,8 @@ HOURS_PER_TASK="${HOURS_PER_TASK:-2}"
 CONDA_ENV="${CONDA_ENV:-Astar}"
 DRY_RUN="${DRY_RUN:-0}"
 MAX_WALLTIME_H="${MAX_WALLTIME_H:-48}"   # queue limit
+MEM="${MEM:-16gb}"                       # host RAM per job (per-user limits count it; lower = easier to schedule)
+JOB_CPUS="${JOB_CPUS:-4}"
 TAPPED=" DRAGON DRAGONID FREEDOM MENTOR LightGCN "   # models with a tap adapter (src/taps.py); others: Recall only
 # reduced tuning grid for models whose official grid is too large (COHESION: 64 combinations)
 COHESION_GRID="${COHESION_GRID:---learning_rate=[0.001,0.0001] --reg_weight=[0.01,0.001] --num_layer=[2,3]}"
@@ -145,7 +148,7 @@ done
 rm -f "$TODO"
 
 echo "Datasets: $DATASETS | models: $MODELS | conditions: $CONDS | seeds: $SEEDS"
-echo "$N tasks -> $W job(s) x $PARALLEL in parallel | $QDIR"
+echo "$N tasks -> $W job(s) x $PARALLEL in parallel, ${JOB_CPUS} cpus / ${MEM} per job | $QDIR"
 for ((w = 0; w < W; w++)); do
     K=$(grep -c . "$QDIR/worker$w.txt" || true); [ "$K" -gt 0 ] || continue
     H=$(( (K + PARALLEL - 1) / PARALLEL * HOURS_PER_TASK + 2 ))
@@ -154,7 +157,7 @@ for ((w = 0; w < W; w++)); do
         H=$MAX_WALLTIME_H
     fi
     WT=$(printf '%02d:00:00' "$H")
-    CMD=(qsub -N "diag_w${w}" -l "walltime=${WT}" -v "TASK_FILE=$QDIR/worker$w.txt,CONDA_ENV=$CONDA_ENV,PARALLEL=$PARALLEL" scripts/diag_worker.pbs)
+    CMD=(qsub -N "diag_w${w}" -l "select=1:ncpus=${JOB_CPUS}:ngpus=1:mem=${MEM}" -l "walltime=${WT}" -v "TASK_FILE=$QDIR/worker$w.txt,CONDA_ENV=$CONDA_ENV,PARALLEL=$PARALLEL" scripts/diag_worker.pbs)
     if [ "$DRY_RUN" = "1" ]; then echo "[dry-run] ${CMD[*]}"; JID=DRYRUN
     elif ! JID=$("${CMD[@]}" 2>&1); then
         echo "${CMD[*]}" >> "$QDIR/pending.sh"
