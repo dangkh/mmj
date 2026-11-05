@@ -42,7 +42,7 @@ run_task() {   # run_task NAME MODEL DATASET SEED ARGS...
         else
             python -u tools/probe_knn.py -d "$DS" --taps "$TAPS" --no_raw --tag "${MODEL}_${NAME}" || echo "[probe] FAILED"
         fi
-        if [ "$MODEL" = "DRAGON" ]; then
+        if [ "$MODEL" = "DRAGON" ] || [ "$MODEL" = "DRAGONID" ]; then
             if [ -f "log/graph_control_${DS}_${MODEL}-${DS}-${NAME}.json" ]; then
                 echo "[graph_control] skip"
             else

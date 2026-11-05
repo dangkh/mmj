@@ -1,0 +1,14 @@
+embedding_size: 64
+feat_embed_dim: 64
+
+n_mm_layers: 1
+n_layers: 2
+knn_k: 10
+mm_image_weight: 0.0      # text-only item-item graph as in SCOPE (use a data folder whose cache was built so, e.g. baby_vcopy)
+aggr_mode: ['add']
+learning_rate: [0.1, 0.01, 0.001, 0.0001, 0.00001]
+reg_weight: [0.1, 0.01, 0.001, 0.0001, 0.00001]
+hyper_parameters: ["aggr_mode", "reg_weight", "learning_rate"]
+# DRAGONID (src/models/dragonid.py): visual branch replaced by an item-ID table, SCOPE-style
+id_dim: 64
+id_init: 'normal'        # 'normal' = nn.Embedding default N(0,1) (SCOPE); 'xavier'

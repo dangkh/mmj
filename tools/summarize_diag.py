@@ -106,13 +106,15 @@ def main():
                 rows.append(rec)
 
         print('\n' + '=' * 100 + '\n{} on {}   (mean±std over seeds; Δ = paired by seed vs real)'.format(model, args.dataset))
-        print('{:<9s} {:>18s} {:>18s} {:>18s} {:>8s}  {}'.format('cond', 'test R@20', 'Δ R@20 vs real', 'test N@20', 't', 'seeds'))
+        print('{:<9s} {:>18s} {:>18s} {:>18s} {:>8s}  {}'.format('cond', 'test R@20', 'Δ R@20 vs ref', 'test N@20', 't', 'seeds'))
+        print('(ref = real for the first block and for real_tg; ref = real_tg for the other *_tg rows, same text graph)')
         for cond in CONDS:
             r = [data[(cond, s)].get('recall') for s in args.seeds]
             n = [data[(cond, s)].get('ndcg') for s in args.seeds]
-            d = [data[(cond, s)].get('recall') - data[('real', s)]['recall']
+            ref = 'real_tg' if cond.endswith('_tg') and cond != 'real_tg' else 'real'   # same item graph
+            d = [data[(cond, s)].get('recall') - data[(ref, s)]['recall']
                  for s in args.seeds if data[(cond, s)].get('recall') is not None
-                 and data[('real', s)].get('recall') is not None]
+                 and data[(ref, s)].get('recall') is not None]
             st = stats(d)
             t = st[0] / (st[1] / math.sqrt(st[2])) if st and st[2] > 1 and st[1] > 1e-9 else float('nan')
             have = [str(s) for s in args.seeds if data[(cond, s)].get('recall') is not None]
@@ -132,6 +134,35 @@ def main():
                     cells += '{:>10s}'.format('-' if st is None else ('{:+.4f}' if c.startswith(('G[', 'T2 v', 'T2 t'))
                                                                     else '{:.4f}').format(st[0]))
                 print('{:<16s}'.format(c) + cells)
+
+    # DRAGONID (visual branch -> SCOPE-style item-ID branch), compared with DRAGON on the same folder/graph
+    variants = [('dragonid (N(0,1))', 'dragonid_s{}'), ('dragonid (xavier)', 'dragonid_xav_s{}')]
+    ds_tg = FOLDER['real_tg'].format(args.dataset)
+    found = False
+    for lab, pat in variants:
+        rec = {s: latest_log('DRAGONID', ds_tg, pat.format(s)) for s in args.seeds}
+        if not any(rec.values()):
+            continue
+        if not found:
+            print('\n' + '=' * 100 + '\nDRAGONID on {} (text item graph); refs: DRAGON real_tg / real / const'.format(ds_tg))
+            print('{:<20s} {:>18s} {:>18s} {:>18s} {:>18s}  {}'.format(
+                'variant', 'test R@20', 'Δ vs real_tg', 'Δ vs real', 'Δ vs const', 'seeds'))
+            found = True
+        r = [rec[s].get('test_recall@20') if rec[s] else None for s in args.seeds]
+        cells = []
+        for ref in ('real_tg', 'real', 'const'):
+            refd = {s: latest_log('DRAGON', FOLDER[ref].format(args.dataset), run_name('DRAGON', ref, s)) for s in args.seeds}
+            d = [r[i] - refd[s]['test_recall@20'] for i, s in enumerate(args.seeds)
+                 if r[i] is not None and refd[s] is not None]
+            st = stats(d)
+            t = st[0] / (st[1] / math.sqrt(st[2])) if st and st[2] > 1 and st[1] > 1e-9 else float('nan')
+            cells.append(fmt(st, True) + ('' if math.isnan(t) else ' t={:+.1f}'.format(t)))
+        print('{:<20s} {:>18s} {:>18s} {:>18s} {:>18s}  {}'.format(
+            lab, fmt(stats(r)), *cells, ','.join(str(s) for i, s in enumerate(args.seeds) if r[i] is not None)))
+        for i, s in enumerate(args.seeds):
+            if r[i] is not None:
+                rows.append({'model': 'DRAGONID', 'cond': lab, 'seed': s, 'dataset': ds_tg, 'name': pat.format(s),
+                             'recall': r[i], 'ndcg': rec[s].get('test_ndcg@20'), 'valid': rec[s].get('valid_recall@20')})
 
     if args.csv:
         keys = sorted({k for r in rows for k in r})

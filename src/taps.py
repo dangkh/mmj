@@ -36,6 +36,8 @@ def _dragon(m):
         # DRAGON feeds the raw features (m.v_feat) to its GCNs; image_embedding / image_trs are unused.
         if getattr(gcn, 'dim_latent', None):
             out['T1_' + mod] = gcn.MLP_1(F.leaky_relu(gcn.MLP(feat)))
+        else:                         # no MLP (DRAGONID's ID branch): the GCN input is the table itself
+            out['T1_' + mod] = feat
         rep, pref = gcn(getattr(m, 'edge_index_drop' + mod), m.edge_index, feat)   # same call as DRAGON.forward
         out['T2_' + mod] = rep[m.n_users:]
         out['P_' + mod] = pref        # per-modality user preference (user-ID parameters), for tools/graph_control.py
@@ -95,6 +97,7 @@ def _lightgcn(m):
 
 ADAPTERS = {
     'DRAGON': _dragon,
+    'DRAGONID': _dragon,   # visual branch = item-ID table (src/models/dragonid.py)
     'FREEDOM': _freedom,
     'LATTICE': _lattice,
     'MGCN': _mgcn,
