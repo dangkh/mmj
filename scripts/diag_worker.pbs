@@ -60,6 +60,7 @@ run_task() {   # run_task NAME MODEL DATASET SEED ARGS...
     return $rc
 }
 
+set -f      # no globbing: task lines contain list overrides such as --num_layer=[2,3]
 N=0; FAIL=0
 while IFS= read -r LINE || [ -n "$LINE" ]; do
     LINE=$(echo "$LINE" | tr -d '\r'); [ -z "$LINE" ] && continue
