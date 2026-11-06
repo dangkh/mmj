@@ -122,7 +122,7 @@ for DS in $DATASETS; do
                 [ -f "src/configs/model/$M.yaml" ] || { echo "no config src/configs/model/$M.yaml"; exit 1; }
                 TUNE=$(echo "$M" | tr 'A-Z' 'a-z')_grid
                 TUNE_ARGS=""; [ "$M" = COHESION ] && TUNE_ARGS="$COHESION_GRID"
-                if ! ARGS=$(python tools/best_params.py "$M" "${PARAMS_FROM:-$DS}" "$TUNE"); then
+                if ! ARGS=$(python tools/best_params.py "$M" "$DS" "$TUNE"); then
                     echo "  $M on $DS: tuning first ($TUNE ${TUNE_ARGS:-official grid}); re-run this script when it has finished"
                     add "$DS" "$TUNE" "$M" "$DS" 999 $TUNE_ARGS
                     continue
@@ -166,7 +166,7 @@ for ((w = 0; w < W; w++)); do
         H=$MAX_WALLTIME_H
     fi
     WT=$(printf '%02d:00:00' "$H")
-    CMD=(qsub -q "${QUEUE:-small_gpuq}" -N "diag_w${w}" -l "select=1:ncpus=${JOB_CPUS}:ngpus=1:mem=${MEM}" -l "walltime=${WT}" -v "TASK_FILE=$QDIR/worker$w.txt,CONDA_ENV=$CONDA_ENV,PARALLEL=$PARALLEL" scripts/diag_worker.pbs)
+    CMD=(qsub -N "diag_w${w}" -l "select=1:ncpus=${JOB_CPUS}:ngpus=1:mem=${MEM}" -l "walltime=${WT}" -v "TASK_FILE=$QDIR/worker$w.txt,CONDA_ENV=$CONDA_ENV,PARALLEL=$PARALLEL" scripts/diag_worker.pbs)
     if [ "$DRY_RUN" = "1" ]; then echo "[dry-run] ${CMD[*]}"; JID=DRYRUN
     elif ! JID=$("${CMD[@]}" 2>&1); then
         echo "${CMD[*]}" >> "$QDIR/pending.sh"
