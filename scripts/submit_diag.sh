@@ -117,7 +117,10 @@ for DS in $DATASETS; do
     for c in $CONDS; do make_folder "$DS" "$c"; done
     for M in $MODELS; do
         case "$M" in
-            DRAGON)  [[ "$DS" == cloth* ]] && ARGS="--learning_rate=0.0001 --reg_weight=0.1" || ARGS="--learning_rate=0.0001 --reg_weight=0.001" ;;
+            DRAGON)  # official setting (Clothing reg 0.1); DRAGON_ARGS="..." overrides it, e.g. to stay consistent with earlier runs
+                if [ -n "${DRAGON_ARGS:-}" ]; then ARGS="$DRAGON_ARGS"
+                elif [[ "$DS" == cloth* ]]; then ARGS="--learning_rate=0.0001 --reg_weight=0.1"
+                else ARGS="--learning_rate=0.0001 --reg_weight=0.001"; fi ;;
             *)  # FREEDOM, MENTOR, COHESION, LGMRec, PGL, ...: tune on the real data first (selection on valid)
                 [ -f "src/configs/model/$M.yaml" ] || { echo "no config src/configs/model/$M.yaml"; exit 1; }
                 TUNE=$(echo "$M" | tr 'A-Z' 'a-z')_grid
