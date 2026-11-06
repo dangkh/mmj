@@ -5,6 +5,8 @@ Build a control copy of a dataset in which one modality carries no item-specific
     perm  : feature rows shuffled across items (same distribution, still item-unique, wrong item)
     noise : Gaussian rows with the same per-dimension mean / std (item-unique, no real structure)
     const : every row = the mean feature vector (no content and no item identity)
+    ones  : every row = all ones      (the constant knockout of Ye et al., ECIR'26 / arXiv 2508.07399)
+    gauss : rows ~ N(0, 1), unscaled  (their noise knockout; unlike `noise`, not matched to the features)
     copy  : the real features unchanged (a clean copy with its own graph cache, e.g. to train with
             --mm_image_weight=0.0 without touching the cache of the original folder)
 
@@ -35,7 +37,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('-d', '--dataset', default='baby')
     ap.add_argument('--modality', choices=['v', 't'], default='v')
-    ap.add_argument('--mode', choices=['perm', 'noise', 'const', 'copy'], default='perm')
+    ap.add_argument('--mode', choices=['perm', 'noise', 'const', 'ones', 'gauss', 'copy'], default='perm')
     ap.add_argument('--suffix', default='', help='appended to the folder name, e.g. _rg')
     ap.add_argument('--reuse_graph', action='store_true',
                     help="copy the original folder's cached item-item graphs (*adj*.pt) into the new one, so the "
@@ -91,6 +93,10 @@ def main():
             Y = (rng.standard_normal(X.shape) * args.scale + X.mean(0)).astype(np.float32)
         else:
             Y = (rng.standard_normal(X.shape) * X.std(0) + X.mean(0)).astype(np.float32)
+    elif args.mode == 'ones':
+        Y = np.ones_like(X)
+    elif args.mode == 'gauss':
+        Y = rng.standard_normal(X.shape).astype(np.float32)
     else:   # const: mean vector (not zeros: zero rows make cosine/normalisation undefined in some models)
         Y = np.tile(X.mean(0, keepdims=True), (X.shape[0], 1)).astype(np.float32)
     out = os.path.join(dst, target)

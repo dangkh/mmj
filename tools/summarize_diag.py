@@ -21,9 +21,9 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'scripts'))
 from collect_results import parse_log   # noqa: E402
 
-CONDS = ['real', 'perm', 'noise', 'const', 'id',                       # full replacement (graph changes too)
+CONDS = ['real', 'perm', 'noise', 'const', 'ones', 'gauss', 'id',     # full replacement (graph changes too)
          'real_tg', 'perm_tg', 'noise_tg', 'const_tg', 'id_tg']          # text-only item graph, branch varies
-FOLDER = {'real': '{}', 'perm': '{}_vperm', 'noise': '{}_vnoise', 'const': '{}_vconst', 'id': '{}_vnoise64',
+FOLDER = {'real': '{}', 'perm': '{}_vperm', 'noise': '{}_vnoise', 'const': '{}_vconst', 'ones': '{}_vones', 'gauss': '{}_vgauss', 'id': '{}_vnoise64',
           'real_tg': '{}_vcopy', 'perm_tg': '{}_vperm_tg', 'noise_tg': '{}_vnoise_tg',
           'const_tg': '{}_vconst_tg', 'id_tg': '{}_vnoise64_tg'}
 TAPS = ['T1_v', 'T1_t', 'T1_v+T1_t', 'T2_v', 'T2_t', 'T2_v+T2_t', 'T2_cat', 'T3']

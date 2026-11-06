@@ -21,6 +21,8 @@
 #   perm     <ds>_vperm            image rows shuffled across items   (identity kept, content wrong)
 #   noise    <ds>_vnoise           Gaussian rows                      (identity kept, no content)
 #   const    <ds>_vconst           mean vector for every item         (no identity, no content)
+#   ones     <ds>_vones            all-ones rows   } knockout protocol of Ye et al. (ECIR'26), to compare
+#   gauss    <ds>_vgauss           N(0,1) rows     } their conclusions with the perm / const decomposition
 #   id       <ds>_vnoise64         64-d noise; DRAGON/MENTOR --learn_v_feat=True
 #   real_tg  <ds>_vcopy            real images, item-item graph from text only (--mm_image_weight=0.0)
 #   perm_tg / noise_tg / const_tg / id_tg   same with the text-only item-item graph
@@ -49,7 +51,8 @@ folder() {   # folder <ds> <cond>
         real) echo "$1" ;;              perm) echo "$1_vperm" ;;        noise) echo "$1_vnoise" ;;
         const) echo "$1_vconst" ;;      id) echo "$1_vnoise64" ;;       real_tg) echo "$1_vcopy" ;;
         perm_tg) echo "$1_vperm_tg" ;;  noise_tg) echo "$1_vnoise_tg" ;; const_tg) echo "$1_vconst_tg" ;;
-        id_tg) echo "$1_vnoise64_tg" ;; *) echo "unknown condition $2" >&2; exit 1 ;;
+        id_tg) echo "$1_vnoise64_tg" ;; ones) echo "$1_vones" ;;          gauss) echo "$1_vgauss" ;;
+        *) echo "unknown condition $2" >&2; exit 1 ;;
     esac
 }
 make_folder() {   # make_folder <ds> <cond>
@@ -57,7 +60,7 @@ make_folder() {   # make_folder <ds> <cond>
     [ "$c" = real ] && return 0
     [ -d "data/$f" ] && [ -f "src/configs/dataset/$f.yaml" ] && return 0
     case "$c" in
-        perm|noise|const) python tools/make_control_data.py -d "$ds" --modality v --mode "$c" ;;
+        perm|noise|const|ones|gauss) python tools/make_control_data.py -d "$ds" --modality v --mode "$c" ;;
         id)       python tools/make_control_data.py -d "$ds" --modality v --mode noise --dim 64 ;;
         real_tg)  python tools/make_control_data.py -d "$ds" --modality v --mode copy ;;
         perm_tg|noise_tg|const_tg) python tools/make_control_data.py -d "$ds" --modality v --mode "${c%_tg}" --suffix _tg ;;
