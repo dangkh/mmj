@@ -7,6 +7,7 @@
 #   CONDS="real perm noise const real_tg const_tg" bash scripts/submit_diag.sh sports
 #   DRY_RUN=1 bash scripts/submit_diag.sh sports              # show the split, submit nothing
 #   MEM=32gb PARALLEL=1 bash scripts/submit_diag.sh clothing    # resources per job (default 16gb, 4 cpus)
+#   QUEUE=medium_gpuq bash scripts/submit_diag.sh sports         # another GPU queue (default small_gpuq)
 #
 # Two stages, both handled by re-running the same command:
 #   1. FREEDOM / MENTOR are first tuned on the real data with their official grid (name freedom_grid /
@@ -21,6 +22,8 @@
 #   perm     <ds>_vperm            image rows shuffled across items   (identity kept, content wrong)
 #   noise    <ds>_vnoise           Gaussian rows                      (identity kept, no content)
 #   const    <ds>_vconst           mean vector for every item         (no identity, no content)
+#   perm2..perm5  <ds>_vperm_p<k>  independent permutations (seed 2026+k), to measure permutation variance
+#   constn   <ds>_vconstn          mean direction rescaled to the average feature norm
 #   ones     <ds>_vones            all-ones rows   } knockout protocol of Ye et al. (ECIR'26), to compare
 #   gauss    <ds>_vgauss           N(0,1) rows     } their conclusions with the perm / const decomposition
 #   id       <ds>_vnoise64         64-d noise; DRAGON/MENTOR --learn_v_feat=True
@@ -42,8 +45,10 @@ DRY_RUN="${DRY_RUN:-0}"
 MAX_WALLTIME_H="${MAX_WALLTIME_H:-48}"   # queue limit
 MEM="${MEM:-16gb}"                       # host RAM per job (per-user limits count it; lower = easier to schedule)
 JOB_CPUS="${JOB_CPUS:-4}"
+QUEUE="${QUEUE:-small_gpuq}"             # e.g. QUEUE=<medium gpu queue> when it has free GPUs (qstat -Q lists queues)
 TAPPED=" DRAGON DRAGONID FREEDOM MENTOR LightGCN "   # models with a tap adapter (src/taps.py); others: Recall only
 # reduced tuning grid for models whose official grid is too large (COHESION: 64 combinations)
+DRAGON_GRID="${DRAGON_GRID:---learning_rate=[0.001,0.0001] --reg_weight=[0.1,0.01,0.001]}"   # DRAGON outside Amazon
 COHESION_GRID="${COHESION_GRID:---learning_rate=[0.001,0.0001] --reg_weight=[0.01,0.001] --num_layer=[2,3]}"
 
 folder() {   # folder <ds> <cond>
@@ -52,6 +57,9 @@ folder() {   # folder <ds> <cond>
         const) echo "$1_vconst" ;;      id) echo "$1_vnoise64" ;;       real_tg) echo "$1_vcopy" ;;
         perm_tg) echo "$1_vperm_tg" ;;  noise_tg) echo "$1_vnoise_tg" ;; const_tg) echo "$1_vconst_tg" ;;
         id_tg) echo "$1_vnoise64_tg" ;; ones) echo "$1_vones" ;;          gauss) echo "$1_vgauss" ;;
+        constn) echo "$1_vconstn" ;;    constn_tg) echo "$1_vconstn_tg" ;;
+        perm[2-9]) echo "$1_vperm_p${2#perm}" ;;
+        perm[2-9]_tg) local k=${2#perm}; echo "$1_vperm_p${k%_tg}_tg" ;;
         *) echo "unknown condition $2" >&2; exit 1 ;;
     esac
 }
@@ -60,7 +68,10 @@ make_folder() {   # make_folder <ds> <cond>
     [ "$c" = real ] && return 0
     [ -d "data/$f" ] && [ -f "src/configs/dataset/$f.yaml" ] && return 0
     case "$c" in
-        perm|noise|const|ones|gauss) python tools/make_control_data.py -d "$ds" --modality v --mode "$c" ;;
+        perm|noise|const|constn|ones|gauss) python tools/make_control_data.py -d "$ds" --modality v --mode "$c" ;;
+        perm[2-9]|perm[2-9]_tg) local k=${c#perm}; k=${k%_tg}; local suf="_p$k"; [[ "$c" == *_tg ]] && suf="${suf}_tg"
+                  python tools/make_control_data.py -d "$ds" --modality v --mode perm --seed $((2026 + k)) --suffix "$suf" ;;
+        constn_tg) python tools/make_control_data.py -d "$ds" --modality v --mode constn --suffix _tg ;;
         id)       python tools/make_control_data.py -d "$ds" --modality v --mode noise --dim 64 ;;
         real_tg)  python tools/make_control_data.py -d "$ds" --modality v --mode copy ;;
         perm_tg|noise_tg|const_tg) python tools/make_control_data.py -d "$ds" --modality v --mode "${c%_tg}" --suffix _tg ;;
@@ -116,15 +127,23 @@ for DS in $DATASETS; do
     [ -f "data/${DS}/${DS}.inter" ] || { echo "data/${DS} not set up (bash scripts/setup_data.sh ${DS})"; exit 1; }
     for c in $CONDS; do make_folder "$DS" "$c"; done
     for M in $MODELS; do
+        TUNE_DRAGON=0
+        if [ "$M" = DRAGON ] && [ -z "${DRAGON_ARGS:-}" ]; then
+            case "$DS" in baby*|sports*|cloth*) ;; *) TUNE_DRAGON=1 ;; esac   # no official setting outside Amazon
+        fi
         case "$M" in
-            DRAGON)  # official setting (Clothing reg 0.1); DRAGON_ARGS="..." overrides it, e.g. to stay consistent with earlier runs
+            DRAGON) [ "$TUNE_DRAGON" = 1 ] || {
+                # official setting (Clothing reg 0.1); DRAGON_ARGS="..." overrides it, e.g. to stay consistent with earlier runs
                 if [ -n "${DRAGON_ARGS:-}" ]; then ARGS="$DRAGON_ARGS"
                 elif [[ "$DS" == cloth* ]]; then ARGS="--learning_rate=0.0001 --reg_weight=0.1"
-                else ARGS="--learning_rate=0.0001 --reg_weight=0.001"; fi ;;
-            *)  # FREEDOM, MENTOR, COHESION, LGMRec, PGL, ...: tune on the real data first (selection on valid)
+                else ARGS="--learning_rate=0.0001 --reg_weight=0.001"; fi; } ;;
+        esac
+        case "$M:$TUNE_DRAGON" in
+            DRAGON:0) ;;
+            *)  # FREEDOM, MENTOR, COHESION, ... and DRAGON on non-Amazon data: tune on the real data first (valid)
                 [ -f "src/configs/model/$M.yaml" ] || { echo "no config src/configs/model/$M.yaml"; exit 1; }
                 TUNE=$(echo "$M" | tr 'A-Z' 'a-z')_grid
-                TUNE_ARGS=""; [ "$M" = COHESION ] && TUNE_ARGS="$COHESION_GRID"
+                TUNE_ARGS=""; [ "$M" = COHESION ] && TUNE_ARGS="$COHESION_GRID"; [ "$M" = DRAGON ] && TUNE_ARGS="$DRAGON_GRID"
                 if ! ARGS=$(python tools/best_params.py "$M" "$DS" "$TUNE"); then
                     echo "  $M on $DS: tuning first ($TUNE ${TUNE_ARGS:-official grid}); re-run this script when it has finished"
                     add "$DS" "$TUNE" "$M" "$DS" 999 $TUNE_ARGS
@@ -160,7 +179,7 @@ done
 rm -f "$TODO"
 
 echo "Datasets: $DATASETS | models: $MODELS | conditions: $CONDS | seeds: $SEEDS"
-echo "$N tasks -> $W job(s) x $PARALLEL in parallel, ${JOB_CPUS} cpus / ${MEM} per job | $QDIR"
+echo "$N tasks -> $W job(s) x $PARALLEL in parallel, ${JOB_CPUS} cpus / ${MEM} per job, queue $QUEUE | $QDIR"
 for ((w = 0; w < W; w++)); do
     K=$(grep -c . "$QDIR/worker$w.txt" || true); [ "$K" -gt 0 ] || continue
     H=$(( (K + PARALLEL - 1) / PARALLEL * HOURS_PER_TASK + 2 ))
@@ -169,7 +188,7 @@ for ((w = 0; w < W; w++)); do
         H=$MAX_WALLTIME_H
     fi
     WT=$(printf '%02d:00:00' "$H")
-    CMD=(qsub -N "diag_w${w}" -l "select=1:ncpus=${JOB_CPUS}:ngpus=1:mem=${MEM}" -l "walltime=${WT}" -v "TASK_FILE=$QDIR/worker$w.txt,CONDA_ENV=$CONDA_ENV,PARALLEL=$PARALLEL" scripts/diag_worker.pbs)
+    CMD=(qsub -q "$QUEUE" -N "diag_w${w}" -l "select=1:ncpus=${JOB_CPUS}:ngpus=1:mem=${MEM}" -l "walltime=${WT}" -v "TASK_FILE=$QDIR/worker$w.txt,CONDA_ENV=$CONDA_ENV,PARALLEL=$PARALLEL" scripts/diag_worker.pbs)
     if [ "$DRY_RUN" = "1" ]; then echo "[dry-run] ${CMD[*]}"; JID=DRYRUN
     elif ! JID=$("${CMD[@]}" 2>&1); then
         echo "${CMD[*]}" >> "$QDIR/pending.sh"

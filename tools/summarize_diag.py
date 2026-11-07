@@ -21,11 +21,16 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'scripts'))
 from collect_results import parse_log   # noqa: E402
 
-CONDS = ['real', 'perm', 'noise', 'const', 'ones', 'gauss', 'id',     # full replacement (graph changes too)
-         'real_tg', 'perm_tg', 'noise_tg', 'const_tg', 'id_tg']          # text-only item graph, branch varies
-FOLDER = {'real': '{}', 'perm': '{}_vperm', 'noise': '{}_vnoise', 'const': '{}_vconst', 'ones': '{}_vones', 'gauss': '{}_vgauss', 'id': '{}_vnoise64',
+CONDS = ['real', 'perm', 'perm2', 'perm3', 'perm4', 'perm5', 'noise', 'const', 'constn', 'ones', 'gauss', 'id',
+         'real_tg', 'perm_tg', 'perm2_tg', 'perm3_tg', 'noise_tg', 'const_tg', 'constn_tg', 'id_tg']
+FOLDER = {'real': '{}', 'perm': '{}_vperm', 'noise': '{}_vnoise', 'const': '{}_vconst', 'constn': '{}_vconstn',
+          'ones': '{}_vones', 'gauss': '{}_vgauss', 'id': '{}_vnoise64',
           'real_tg': '{}_vcopy', 'perm_tg': '{}_vperm_tg', 'noise_tg': '{}_vnoise_tg',
-          'const_tg': '{}_vconst_tg', 'id_tg': '{}_vnoise64_tg'}
+          'const_tg': '{}_vconst_tg', 'constn_tg': '{}_vconstn_tg', 'id_tg': '{}_vnoise64_tg'}
+for _k in range(2, 6):     # independent permutations (scripts/submit_diag.sh perm2 ... perm5)
+    FOLDER['perm%d' % _k] = '{}_vperm_p%d' % _k
+    FOLDER['perm%d_tg' % _k] = '{}_vperm_p%d_tg' % _k
+PERMS = ['perm'] + ['perm%d' % k for k in range(2, 6)]
 TAPS = ['T1_v', 'T1_t', 'T1_v+T1_t', 'T2_v', 'T2_t', 'T2_v+T2_t', 'T2_cat', 'T3']
 GAINS = ['G[T1_v|T1_t]', 'G[T2_v|T2_t]']
 GC = [('v | content+users - noise+users', 'T2 v content'), ('v | content+users - content+0users', 'T2 v user-ID'),
@@ -68,6 +73,40 @@ def fmt(st, sign=False):
     m, s, n = st
     f = '{:+.4f}' if sign else '{:.4f}'
     return (f + '±{:.4f}').format(m, s) + ('' if n > 1 else '(n=1)')
+
+
+def perm_robustness(data, seeds):
+    """Several independent permutations: per-permutation paired contrasts, then their spread across permutations.
+    Alignment A = real - perm_k ; distinctiveness D = perm_k - const (same graph protocol)."""
+    for suffix, ref, const in (('', 'real', 'const'), ('_tg', 'real_tg', 'const_tg')):
+        rows = []
+        for p in PERMS:
+            cond = p + suffix
+            if not any(data.get((cond, s), {}).get('recall') is not None for s in seeds):
+                continue
+            A = [data[(ref, s)]['recall'] - data[(cond, s)]['recall'] for s in seeds
+                 if data.get((ref, s), {}).get('recall') is not None and data[(cond, s)].get('recall') is not None]
+            D = [data[(cond, s)]['recall'] - data[(const, s)]['recall'] for s in seeds
+                 if data.get((const, s), {}).get('recall') is not None and data[(cond, s)].get('recall') is not None]
+            rows.append((cond, stats(A), stats(D)))
+        if len(rows) < 2:
+            continue
+        print('\nIndependent permutations{}: A = {} - perm_k, D = perm_k - {} (paired over training seeds)'.format(
+            ' (text graph)' if suffix else '', ref, const))
+        for cond, a, d in rows:
+            print('  {:<10s} A {:>18s}   D {:>18s}'.format(cond, fmt(a, True), fmt(d, True)))
+        for lab, idx in (('A', 1), ('D', 2)):
+            means = [r[idx][0] for r in rows if r[idx] is not None]
+            within = [r[idx][1] for r in rows if r[idx] is not None and r[idx][2] > 1]
+            if len(means) < 2:
+                continue
+            m, sd, n = stats(means)
+            t = m / (sd / math.sqrt(n)) if sd > 1e-9 else float('nan')
+            sign = sum(1 for x in means if x > 0)
+            print('  {} across {} permutations: mean {:+.4f}, sd(perm) {:.4f}, mean sd(train seed) {}, '
+                  '{} of {} > 0, t(perm-level) {}'.format(
+                      lab, n, m, sd, '{:.4f}'.format(sum(within) / len(within)) if within else '-', sign, n,
+                      '-' if math.isnan(t) else '{:+.1f}'.format(t)))
 
 
 def main():
@@ -126,6 +165,8 @@ def main():
             print('{:<9s} {:>18s} {:>18s} {:>18s} {:>8s}  {}'.format(
                 cond, fmt(stats(r)), fmt(st, True) if cond != 'real' else '', fmt(stats(n)),
                 '' if cond == 'real' or math.isnan(t) else '{:+.1f}'.format(t), ','.join(have) or '-'))
+
+        perm_robustness(data, args.seeds)
 
         cols = [c for c in TAPS + GAINS + [lab for _, lab in GC]
                 if any(data[(cd, s)].get(c) is not None for cd in CONDS for s in args.seeds)]

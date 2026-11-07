@@ -7,6 +7,11 @@ Build a control copy of a dataset in which one modality carries no item-specific
     const : every row = the mean feature vector (no content and no item identity)
     ones  : every row = all ones      (the constant knockout of Ye et al., ECIR'26 / arXiv 2508.07399)
     gauss : rows ~ N(0, 1), unscaled  (their noise knockout; unlike `noise`, not matched to the features)
+    constn: the mean direction rescaled to the average row norm (a constant control with the norm of the
+            real features: separates "no item-specific variation" from "smaller feature norm")
+
+Each control folder gets control_meta.json (mode, seed, ...), read by tools/audit_runs.py. Independent
+permutations: --mode perm --seed <s> --suffix _p<k> (scripts/submit_diag.sh conditions perm2 ... perm5).
     copy  : the real features unchanged (a clean copy with its own graph cache, e.g. to train with
             --mm_image_weight=0.0 without touching the cache of the original folder)
 
@@ -37,7 +42,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('-d', '--dataset', default='baby')
     ap.add_argument('--modality', choices=['v', 't'], default='v')
-    ap.add_argument('--mode', choices=['perm', 'noise', 'const', 'ones', 'gauss', 'copy'], default='perm')
+    ap.add_argument('--mode', choices=['perm', 'noise', 'const', 'constn', 'ones', 'gauss', 'copy'], default='perm')
     ap.add_argument('--suffix', default='', help='appended to the folder name, e.g. _rg')
     ap.add_argument('--reuse_graph', action='store_true',
                     help="copy the original folder's cached item-item graphs (*adj*.pt) into the new one, so the "
@@ -93,6 +98,10 @@ def main():
             Y = (rng.standard_normal(X.shape) * args.scale + X.mean(0)).astype(np.float32)
         else:
             Y = (rng.standard_normal(X.shape) * X.std(0) + X.mean(0)).astype(np.float32)
+    elif args.mode == 'constn':
+        m = X.mean(0)
+        Y = np.tile((m / (np.linalg.norm(m) + 1e-12) * np.linalg.norm(X, axis=1).mean())[None, :],
+                    (X.shape[0], 1)).astype(np.float32)
     elif args.mode == 'ones':
         Y = np.ones_like(X)
     elif args.mode == 'gauss':
@@ -104,6 +113,10 @@ def main():
         os.remove(out)
     np.save(out, Y)
     print('  wrote {} {} ({})'.format(out, Y.shape, args.mode))
+    import json
+    with open(os.path.join(dst, 'control_meta.json'), 'w') as f:
+        json.dump({'source': args.dataset, 'modality': args.modality, 'mode': args.mode, 'seed': args.seed,
+                   'dim': args.dim, 'scale': args.scale, 'suffix': args.suffix}, f, indent=1)
 
     if args.reuse_graph:
         import glob
