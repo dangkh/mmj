@@ -8,6 +8,9 @@
 #   DRY_RUN=1 bash scripts/submit_diag.sh sports              # show the split, submit nothing
 #   MEM=32gb PARALLEL=1 bash scripts/submit_diag.sh clothing    # resources per job (default 16gb, 4 cpus)
 #   QUEUE=medium_gpuq bash scripts/submit_diag.sh sports         # another GPU queue (default small_gpuq)
+#   Per-condition tuning (each control tuned on its own, a robustness check of the shared-HP protocol):
+#   FORCE_TUNE=1 RUN_TAG=_ct CONDS=real MODELS=DRAGON bash scripts/submit_diag.sh cloth cloth_vperm cloth_vconst
+#     (each folder is treated as a dataset: <model>_grid tuned on it, then <model>_ct_s<seed> runs)
 #
 # Two stages, both handled by re-running the same command:
 #   1. FREEDOM / MENTOR are first tuned on the real data with their official grid (name freedom_grid /
@@ -45,7 +48,9 @@ DRY_RUN="${DRY_RUN:-0}"
 MAX_WALLTIME_H="${MAX_WALLTIME_H:-48}"   # queue limit
 MEM="${MEM:-16gb}"                       # host RAM per job (per-user limits count it; lower = easier to schedule)
 JOB_CPUS="${JOB_CPUS:-4}"
-QUEUE="${QUEUE:-small_gpuq}"             # e.g. QUEUE=<medium gpu queue> when it has free GPUs (qstat -Q lists queues)
+QUEUE="${QUEUE:-small_gpuq}"
+FORCE_TUNE="${FORCE_TUNE:-0}"            # 1: tune every model (DRAGON too) on each given data folder
+RUN_TAG="${RUN_TAG:-}"                   # e.g. _ct: runs named <model>_ct_s<seed> (own series, no clash)             # e.g. QUEUE=<medium gpu queue> when it has free GPUs (qstat -Q lists queues)
 TAPPED=" DRAGON DRAGONID FREEDOM MENTOR LightGCN "   # models with a tap adapter (src/taps.py); others: Recall only
 # reduced tuning grid for models whose official grid is too large (COHESION: 64 combinations)
 DRAGON_GRID="${DRAGON_GRID:---learning_rate=[0.001,0.0001] --reg_weight=[0.1,0.01,0.001]}"   # DRAGON outside Amazon
@@ -81,6 +86,7 @@ make_folder() {   # make_folder <ds> <cond>
 }
 run_name() {   # run_name <model> <cond> <seed>  (DRAGON on baby keeps the names of the first seed-999 runs)
     local m=$1 c=$2 s=$3 low; low=$(echo "$m" | tr 'A-Z' 'a-z')
+    if [ -n "$RUN_TAG" ]; then echo "${low}${RUN_TAG}_s$s"; return; fi   # separate series, e.g. per-condition tuning
     if [ "$m" = DRAGON ] && [ "$s" = 999 ]; then
         case "$c" in id|id_tg) echo dragon_vid ;; real_tg) echo dragon_txtgraph ;; *) echo dragon_taps ;; esac; return
     fi
@@ -128,7 +134,8 @@ for DS in $DATASETS; do
     for c in $CONDS; do make_folder "$DS" "$c"; done
     for M in $MODELS; do
         TUNE_DRAGON=0
-        if [ "$M" = DRAGON ] && [ -z "${DRAGON_ARGS:-}" ]; then
+        [ "$M" = DRAGON ] && [ "$FORCE_TUNE" = 1 ] && TUNE_DRAGON=1
+        if [ "$M" = DRAGON ] && [ -z "${DRAGON_ARGS:-}" ] && [ "$TUNE_DRAGON" = 0 ]; then
             case "$DS" in baby*|sports*|cloth*) ;; *) TUNE_DRAGON=1 ;; esac   # no official setting outside Amazon
         fi
         case "$M" in
