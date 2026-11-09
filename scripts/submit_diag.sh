@@ -9,6 +9,8 @@
 #   MEM=32gb PARALLEL=1 bash scripts/submit_diag.sh clothing    # resources per job (default 16gb, 4 cpus)
 #   QUEUE=medium_gpuq bash scripts/submit_diag.sh sports         # another GPU queue (default small_gpuq)
 #   EXTRA_ARGS="--infonce_chunk=4096" MODELS=MENTOR bash scripts/submit_diag.sh cloth   # MENTOR on Clothing (GPU memory)
+#   COHESION_ARGS="$(python tools/best_params.py COHESION sports cohesion_grid)" MODELS=COHESION bash scripts/submit_diag.sh sports_tconst
+#       fixed hyper-parameters (no tuning) for a derived dataset, e.g. the text-off variant; DRAGON uses DRAGON_ARGS
 #   Per-condition tuning (each control tuned on its own, a robustness check of the shared-HP protocol):
 #   FORCE_TUNE=1 RUN_TAG=_ct CONDS=real MODELS=DRAGON bash scripts/submit_diag.sh cloth cloth_vperm cloth_vconst
 #     (each folder is treated as a dataset: <model>_grid tuned on it, then <model>_ct_s<seed> runs)
@@ -151,6 +153,10 @@ for DS in $DATASETS; do
                 elif [[ "$DS" == cloth* ]]; then ARGS="--learning_rate=0.0001 --reg_weight=0.1"
                 else ARGS="--learning_rate=0.0001 --reg_weight=0.001"; fi; } ;;
         esac
+        FA="${M}_ARGS"
+        if [ "$M" != DRAGON ] && [ -n "${!FA:-}" ]; then
+            ARGS="${!FA}"; echo "  $M on $DS: fixed $FA = $ARGS"   # e.g. COHESION_ARGS=$(python tools/best_params.py COHESION sports cohesion_grid)
+        else
         case "$M:$TUNE_DRAGON" in
             DRAGON:0) ;;
             *)  # FREEDOM, MENTOR, COHESION, ... and DRAGON on non-Amazon data: tune on the real data first (valid)
@@ -163,6 +169,7 @@ for DS in $DATASETS; do
                     continue
                 fi ;;
         esac
+        fi
         echo "  $M on $DS: $ARGS"
         for s in $SEEDS; do
             for c in $CONDS; do

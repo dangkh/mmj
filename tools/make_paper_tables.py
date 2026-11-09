@@ -17,6 +17,8 @@ Writes to <out>/ (CSV = full precision + provenance; MD = readable; TEX = paste 
   fig1_scatter.{csv,pdf,png}   A (x) vs T (y) per cell, 95% CI over seeds, y = x reference
   table_datasets.{csv,md}      users / items / interactions / density + raw-feature kNN probe (image, text, null)
   tableA_raw.csv               absolute R@20 / N@20 mean, std, n of every condition of every cell (appendix)
+  table2a_modality.{csv,md}    visual R/P/C x text real/constant (<ds>_tconst): A with / without text, visual,
+                               text and dual knockout, for --modality_cases
   tableA_textoff.{csv,md}      text-off settings (<ds>_tconst, <ds>_vlm_tconst): A / D / T
   provenance.csv               the log file behind every run used above
 Runs are matched by the same names as scripts/submit_diag.sh (tools/summarize_diag.run_name); paired
@@ -131,6 +133,8 @@ def main():
     ap.add_argument('--models', nargs='+', default=['DRAGON', 'FREEDOM', 'COHESION'])
     ap.add_argument('--appendix_models', nargs='+', default=['MENTOR'])
     ap.add_argument('--key', nargs='+', default=['DRAGON:cloth', 'COHESION:sports'])
+    ap.add_argument('--modality_cases', nargs='+', default=['DRAGON:baby', 'MENTOR:baby', 'FREEDOM:baby', 'DRAGON:cloth', 'COHESION:sports', 'COHESION:dbbook'],
+                    help='Table 2(a): model:dataset cells that also have <dataset>_tconst runs')
     ap.add_argument('--textoff', nargs='+', default=['baby_tconst', 'baby_vlm_tconst', 'sports_vlm_tconst'])
     ap.add_argument('--out', default='paper')
     ap.add_argument('--full_order', nargs='+', default=['DRAGON', 'MENTOR', 'FREEDOM', 'COHESION'],
@@ -388,6 +392,9 @@ def main():
         const = cond_runs(model, ds, 'const')
         for n, p in perms[1:]:
             variants.append(('permutation ' + n, real, p, const))
+        nz = cond_runs(model, ds, 'noise')
+        if nz:
+            variants.append(('moment-matched noise instead of Perm', real, nz, const))
         for cname in ('ones', 'constn'):
             c = cond_runs(model, ds, cname)
             if c:
@@ -432,6 +439,39 @@ def main():
         md.append('| {} | {} | {} | {} | {} |'.format(r['cell'], r['variant'], g('A'), g('D'), g('T')))
     open(os.path.join(args.out, 'table2_robust.md'), 'w').write('\n'.join(md) + '\n')
 
+    # ---------------- Table 2(a): modality availability, visual R/P/C x text real / constant (<ds>_tconst)
+    mav = []
+    for k in args.modality_cases:
+        model, ds = k.split(':')
+        M = {}
+        for tlab, tds in (('T', ds), ('noT', ds + '_tconst')):
+            for c in ('real', 'perm', 'const'):
+                M[(c, tlab)] = cond_runs(model, tds, c)
+        if not M[('real', 'T')] or not M[('real', 'noT')]:
+            continue
+        ref = M[('real', 'T')]
+        row = {'case': k}
+        for c in ('real', 'perm', 'const'):
+            for t in ('T', 'noT'):
+                m_, sd_, n_ = mean_std(M[(c, t)])
+                row['{}|{}'.format(c, t)] = round(m_, 5) if m_ is not None else ''
+        row.update(flat('A_text', paired(M[('real', 'T')], M[('perm', 'T')], ref)))
+        row.update(flat('A_notext', paired(M[('real', 'noT')], M[('perm', 'noT')], ref)))
+        row.update(flat('visualKO', paired(M[('real', 'T')], M[('const', 'T')], ref)))
+        row.update(flat('textKO', paired(M[('real', 'T')], M[('real', 'noT')], ref)))
+        row.update(flat('dualKO', paired(M[('real', 'T')], M[('const', 'noT')], ref)))
+        mav.append(row)
+    write_csv(os.path.join(args.out, 'table2a_modality.csv'), mav)
+    md = ['Table 2(a). Modality availability (% of Real R@20 with text; † p < .05). A = R - P under each text condition;'
+          ' KO = Real minus the knocked-out setting.', '',
+          '| case | A (text real) | A (text constant) | visual KO | text KO | dual KO |', '|---|---|---|---|---|---|']
+    for r in mav:
+        f = lambda kk: '{:+.1f}{}'.format(r['{}_pct'.format(kk)], ' †' if r.get('{}_sig'.format(kk)) else '') \
+            if '{}_pct'.format(kk) in r else '·'
+        md.append('| {} | {} | {} | {} | {} | {} |'.format(r['case'], f('A_text'), f('A_notext'), f('visualKO'),
+                                                         f('textKO'), f('dualKO')))
+    open(os.path.join(args.out, 'table2a_modality.md'), 'w').write('\n'.join(md) + '\n')
+
     # ---------------- text-off appendix
     to = []
     for ds in args.textoff:
@@ -475,19 +515,23 @@ def main():
                 continue
             R = J.get('results', {})
             if 'x_v' in R and 'x_t' in R:
+                G = J.get('derived', {}).get('G[x_v|x_t]', {})
+                if G:
+                    lo, hi = G.get('ci', [0, 0])
+                    row['G_v|t'] = '{:+.4f}{}'.format(G['gain'], '*' if lo > 0 or hi < 0 else '')
                 row.update({'knn_image': R['x_v']['recall'], 'knn_text': R['x_t']['recall'],
                             'knn_null': R.get('null64', {}).get('recall', ''), 'knn_pop': R.get('pop', {}).get('recall', ''),
                             'probe_file': pj})
                 break
         dsr.append(row)
     write_csv(os.path.join(args.out, 'table_datasets.csv'), dsr)
-    md = ['| dataset | users | items | interactions | density % | kNN image | kNN text | kNN null | pop |',
-          '|---|---|---|---|---|---|---|---|---|']
+    md = ['| dataset | users | items | interactions | density % | kNN image | kNN text | kNN null | pop | G[v|t] |',
+          '|---|---|---|---|---|---|---|---|---|---|']
     for r in dsr:
         fmt = lambda v: '{:.4f}'.format(v) if isinstance(v, float) else (str(v) if v != '' else '·')
-        md.append('| {} | {:,} | {:,} | {:,} | {} | {} | {} | {} | {} |'.format(
+        md.append('| {} | {:,} | {:,} | {:,} | {} | {} | {} | {} | {} | {} |'.format(
             r['dataset'], r['users'], r['items'], r['interactions'], r['density_%'], fmt(r.get('knn_image', '')),
-            fmt(r.get('knn_text', '')), fmt(r.get('knn_null', '')), fmt(r.get('knn_pop', ''))))
+            fmt(r.get('knn_text', '')), fmt(r.get('knn_null', '')), fmt(r.get('knn_pop', '')), r.get('G_v|t', '·')))
     open(os.path.join(args.out, 'table_datasets.md'), 'w').write('\n'.join(md) + '\n')
 
     write_csv(os.path.join(args.out, 'provenance.csv'), PROV)
