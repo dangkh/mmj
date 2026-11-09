@@ -33,7 +33,9 @@ run_task() {   # run_task NAME MODEL DATASET SEED ARGS...
         TAPS_ARG="--save_taps=True"; case "$NAME" in *_grid) TAPS_ARG="" ;; esac
         TAPPED=" DRAGON DRAGONID FREEDOM MENTOR LightGCN "
         [[ "$TAPPED" == *" $MODEL "* ]] || TAPS_ARG=""      # no tap adapter: Recall only
-        if grep -l 'BEST ████' src/log/"${MODEL}-${DS}-${NAME}"-*.log >/dev/null 2>&1; then
+        # the task loop runs under `set -f` (task args contain [..] lists), so turn globbing back on for this check;
+        # without it the pattern is never expanded and a requeued job retrains every finished task
+        if (set +f; grep -l 'BEST ████' src/log/"${MODEL}-${DS}-${NAME}"-*.log) >/dev/null 2>&1; then
             echo "[train] skip (finished log exists)"
         else
             # shellcheck disable=SC2068
