@@ -8,6 +8,7 @@
 #   DRY_RUN=1 bash scripts/submit_diag.sh sports              # show the split, submit nothing
 #   MEM=32gb PARALLEL=1 bash scripts/submit_diag.sh clothing    # resources per job (default 16gb, 4 cpus)
 #   QUEUE=medium_gpuq bash scripts/submit_diag.sh sports         # another GPU queue (default small_gpuq)
+#   EXTRA_ARGS="--infonce_chunk=4096" MODELS=MENTOR bash scripts/submit_diag.sh cloth   # MENTOR on Clothing (GPU memory)
 #   Per-condition tuning (each control tuned on its own, a robustness check of the shared-HP protocol):
 #   FORCE_TUNE=1 RUN_TAG=_ct CONDS=real MODELS=DRAGON bash scripts/submit_diag.sh cloth cloth_vperm cloth_vconst
 #     (each folder is treated as a dataset: <model>_grid tuned on it, then <model>_ct_s<seed> runs)
@@ -53,7 +54,8 @@ MAX_WALLTIME_H="${MAX_WALLTIME_H%h}"
 MEM="${MEM:-16gb}"                       # host RAM per job (per-user limits count it; lower = easier to schedule)
 JOB_CPUS="${JOB_CPUS:-4}"
 QUEUE="${QUEUE:-small_gpuq}"
-FORCE_TUNE="${FORCE_TUNE:-0}"            # 1: tune every model (DRAGON too) on each given data folder
+FORCE_TUNE="${FORCE_TUNE:-0}"
+EXTRA_ARGS="${EXTRA_ARGS:-}"             # appended to every task (tuning and runs), e.g. --infonce_chunk=4096            # 1: tune every model (DRAGON too) on each given data folder
 RUN_TAG="${RUN_TAG:-}"                   # e.g. _ct: runs named <model>_ct_s<seed> (own series, no clash)             # e.g. QUEUE=<medium gpu queue> when it has free GPUs (qstat -Q lists queues)
 TAPPED=" DRAGON DRAGONID FREEDOM MENTOR LightGCN "   # models with a tap adapter (src/taps.py); others: Recall only
 # reduced tuning grid for models whose official grid is too large (COHESION: 64 combinations)
@@ -157,7 +159,7 @@ for DS in $DATASETS; do
                 GV="${M}_GRID"; TUNE_ARGS="${!GV:-}"   # COHESION_GRID / DRAGON_GRID (defaults above), MENTOR_GRID, FREEDOM_GRID, ...
                 if ! ARGS=$(python tools/best_params.py "$M" "$DS" "$TUNE"); then
                     echo "  $M on $DS: tuning first ($TUNE ${TUNE_ARGS:-official grid}); re-run this script when it has finished"
-                    add "$DS" "$TUNE" "$M" "$DS" 999 $TUNE_ARGS
+                    add "$DS" "$TUNE" "$M" "$DS" 999 $TUNE_ARGS $EXTRA_ARGS
                     continue
                 fi ;;
         esac
@@ -167,7 +169,7 @@ for DS in $DATASETS; do
                 d=$(folder "$DS" "$c"); n=$(run_name "$M" "$c" "$s"); extra=""
                 case "$c" in *_tg) extra="--mm_image_weight=0.0" ;; esac
                 case "$c" in id|id_tg) [ "$M" != FREEDOM ] && extra="$extra --learn_v_feat=True" ;; esac
-                add "$d" "$n" "$M" "$d" "$s" $ARGS $extra
+                add "$d" "$n" "$M" "$d" "$s" $ARGS $extra $EXTRA_ARGS
             done
         done
     done

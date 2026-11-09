@@ -7,7 +7,7 @@
 cd "$(dirname "$0")/.."
 ACTIVE=$(for j in $(qselect -u "$USER" 2>/dev/null); do qstat -f "$j" | tr -d '\n\t ' | grep -o 'TASK_FILE=[^,]*' | cut -d= -f2; done)
 declare -A ST WHERE; rank() { case $1 in DONE) echo 5;; RUNNING) echo 4;; QUEUED) echo 3;; FAILED|STOPPED) echo 2;; NOTRUN) echo 1;; *) echo 0;; esac; }
-for w in src/log/queue/diag-2026110[6-9]-*/worker*.txt; do
+for w in src/log/queue/diag-2026*/worker*.txt; do
   q=$(dirname "$w"); act=0; grep -qxF "$w" <<< "$ACTIVE" && act=1
   while read -r n m d s rest; do
     [ -z "$n" ] && continue; k="$m $d $n"; o="$q/$m-$d-$n.out"
@@ -26,4 +26,4 @@ for s in RUNNING QUEUED FAILED STOPPED NOTRUN; do
     if [ $s = FAILED ] || [ $s = STOPPED ]; then m=$(grep -E 'Error|Killed|walltime|exceeded' "${WHERE[$k]}" 2>/dev/null | tail -1); [ -z "$m" ] && m=$(tail -1 "${WHERE[$k]}" 2>/dev/null); echo "  $k   <- ${m:0:120}"; else echo "  $k"; fi
   done <<< "$L"
 done
-ls src/log/queue/diag-2026110[6-9]-*/pending.sh 2>/dev/null | sed 's/^/pending: /'
+ls src/log/queue/diag-2026*/pending.sh 2>/dev/null | sed 's/^/pending: /'
