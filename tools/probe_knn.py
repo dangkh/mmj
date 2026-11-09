@@ -105,12 +105,17 @@ def probe(parts, mats, ks, topk, weights=(0.5,)):
     return out
 
 
-def paired_ci(a, b, n=1000, seed=0):
-    """95% bootstrap CI of mean(a - b) over the same users."""
+def paired_ci(a, b, n=1000, seed=0, with_p=False):
+    """95% percentile-bootstrap CI of mean(a - b), resampling USERS (same users in a and b), n resamples.
+    with_p: also a two-sided bootstrap p-value, 2 * min(P(m <= 0), P(m >= 0)), floored at 1/n."""
     d = a - b
     rng = np.random.default_rng(seed)
     m = np.array([d[rng.integers(0, len(d), len(d))].mean() for _ in range(n)])
-    return float(np.percentile(m, 2.5)), float(np.percentile(m, 97.5))
+    ci = (float(np.percentile(m, 2.5)), float(np.percentile(m, 97.5)))
+    if not with_p:
+        return ci
+    p = max(1.0 / n, min(1.0, 2 * min((m <= 0).mean(), (m >= 0).mean())))
+    return ci, float(p)
 
 
 def probe_pop(mats, topk):
@@ -135,6 +140,7 @@ def main():
     ap.add_argument('--topk', type=int, default=20)
     ap.add_argument('--seed', type=int, default=2026)
     ap.add_argument('--tag', default=None)
+    ap.add_argument('--n_boot', type=int, default=1000, help='bootstrap resamples (users) for the G[a|b] CI / p-value')
     ap.add_argument('--out_dir', default='log')
     args = ap.parse_args()
     ks = [int(x) for x in args.ks.split(',')]
@@ -195,8 +201,9 @@ def main():
             for x, y in ((a, b), (b, a)):
                 if y in results:
                     g = results[name]['recall'] - results[y]['recall']
-                    ci = paired_ci(results[name]['_r'], results[y]['_r'])
-                    derived['G[{}|{}]'.format(x, y)] = {'gain': g, 'ci': ci}
+                    ci, pb = paired_ci(results[name]['_r'], results[y]['_r'], n=args.n_boot, with_p=True)
+                    derived['G[{}|{}]'.format(x, y)] = {'gain': g, 'ci': ci, 'p_boot': pb, 'n_boot': args.n_boot,
+                                                        'unit': 'users'}
 
     print('\nitem-kNN probe, Recall@{k} / NDCG@{k} on test (95% CI over users)'.format(k=args.topk))
     for name, r in results.items():

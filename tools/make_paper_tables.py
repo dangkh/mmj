@@ -83,6 +83,11 @@ def paired(a, b, ref):
             't': t, 'n': n, 'sig': (not math.isnan(t)) and abs(t) > tcrit(n - 1)}
 
 
+def sdiff(a, b):
+    """per-seed contrast a - b over matched seeds (dict), for difference-in-contrasts tests."""
+    return {x: a[x] - b[x] for x in sorted(set(a or {}) & set(b or {}))}
+
+
 def decompose(real, perm, const):
     return {'A': paired(real, perm, real), 'D': paired(perm, const, real), 'T': paired(real, const, real)}
 
@@ -399,6 +404,15 @@ def main():
             c = cond_runs(model, ds, cname)
             if c:
                 variants.append(('constant = ' + cname, real, cond_runs(model, ds, 'perm'), c))
+        # direct test of original vs graph-fixed: delta = contrast_original - contrast_fixed, paired over seeds
+        pp, cc = cond_runs(model, ds, 'perm'), cond_runs(model, ds, 'const')
+        pt, ctg = cond_runs(model, ds, 'perm_tg'), cond_runs(model, ds, 'const_tg')
+        if rt and pt and ctg:
+            dG = {'A': paired(sdiff(real, pp), sdiff(rt, pt), real), 'D': paired(sdiff(pp, cc), sdiff(pt, ctg), real),
+                  'T': paired(sdiff(real, cc), sdiff(rt, ctg), real)}
+            dG_row = ('delta_G = original - graph-fixed (direct test)', dG)
+        else:
+            dG_row = None
         ct = {c: cond_runs(model, ds, c, tag='_ct') for c in ('real', 'perm', 'const')}
         if ct['perm'] or ct['const']:
             variants.append(('per-condition tuning', ct['real'] or real, ct['perm'], ct['const']))
@@ -410,6 +424,11 @@ def main():
             for kk in 'ADT':
                 row.update(flat(kk, dec[kk]))
             rob.append(row)
+            if name.startswith('graph-fixed') and dG_row:
+                row = {'cell': k, 'variant': dG_row[0]}
+                for kk in 'ADT':
+                    row.update(flat(kk, dG_row[1][kk]))
+                rob.append(row)
         if len(perms) >= 2:   # across-permutation summary (permutation-level inference)
             As = [paired(real, p, real) for _, p in perms]
             Ds = [paired(p, const, real) for _, p in perms]
@@ -460,16 +479,20 @@ def main():
         row.update(flat('visualKO', paired(M[('real', 'T')], M[('const', 'T')], ref)))
         row.update(flat('textKO', paired(M[('real', 'T')], M[('real', 'noT')], ref)))
         row.update(flat('dualKO', paired(M[('real', 'T')], M[('const', 'noT')], ref)))
+        # difference in alignment contrasts, tested on matched seed-level differences
+        row.update(flat('interaction', paired(sdiff(M[('real', 'noT')], M[('perm', 'noT')]),
+                                              sdiff(M[('real', 'T')], M[('perm', 'T')]), ref)))
         mav.append(row)
     write_csv(os.path.join(args.out, 'table2a_modality.csv'), mav)
     md = ['Table 2(a). Modality availability (% of Real R@20 with text; † p < .05). A = R - P under each text condition;'
           ' KO = Real minus the knocked-out setting.', '',
-          '| case | A (text real) | A (text constant) | visual KO | text KO | dual KO |', '|---|---|---|---|---|---|']
+          '| case | A (text real) | A (text constant) | interaction = A(text const) - A(text real) | visual KO | text KO | dual KO |',
+          '|---|---|---|---|---|---|---|']
     for r in mav:
         f = lambda kk: '{:+.1f}{}'.format(r['{}_pct'.format(kk)], ' †' if r.get('{}_sig'.format(kk)) else '') \
             if '{}_pct'.format(kk) in r else '·'
-        md.append('| {} | {} | {} | {} | {} | {} |'.format(r['case'], f('A_text'), f('A_notext'), f('visualKO'),
-                                                         f('textKO'), f('dualKO')))
+        md.append('| {} | {} | {} | {} | {} | {} | {} |'.format(r['case'], f('A_text'), f('A_notext'), f('interaction'),
+                                                              f('visualKO'), f('textKO'), f('dualKO')))
     open(os.path.join(args.out, 'table2a_modality.md'), 'w').write('\n'.join(md) + '\n')
 
     # ---------------- text-off appendix
@@ -521,6 +544,8 @@ def main():
                 # current probe_knn: {'gain': g, 'ci': [lo, hi]}; older files stored a bare float (+ maybe '<key>_ci')
                 if isinstance(G, dict):
                     g, ci = G.get('gain'), G.get('ci')
+                    if G.get('p_boot') is not None:
+                        row['_p_G'] = G['p_boot']
                 elif isinstance(G, (int, float)):
                     g, ci = float(G), D.get('G[x_v|x_t]_ci') or D.get('G[x_v|x_t]_CI')
                 else:
@@ -534,15 +559,35 @@ def main():
                             'knn_null': R.get('null64', {}).get('recall', ''), 'knn_pop': R.get('pop', {}).get('recall', ''),
                             'probe_file': pj})
                 break
+        for pj in sorted(glob.glob('log/probe_knn_{}_*.json'.format(ds)), key=os.path.getmtime, reverse=True):
+            J = json.load(open(pj))                             # permuted-image sanity probe (tag t0perm)
+            if J.get('args', {}).get('dataset') == ds and 'vperm' in J.get('results', {}):
+                row['knn_vperm'] = J['results']['vperm']['recall']
+                break
         dsr.append(row)
+    # Holm correction of the G[v|t] tests across datasets (only when every probe file carries a bootstrap p)
+    ps = [(i, r['_p_G']) for i, r in enumerate(dsr) if '_p_G' in r]
+    if ps and len(ps) == sum(1 for r in dsr if 'G_v|t' in r):
+        m = len(ps)
+        adj, run = {}, 0.0
+        for j, (i, pv) in enumerate(sorted(ps, key=lambda x: x[1])):
+            run = max(run, min(1.0, (m - j) * pv))
+            adj[i] = run
+        for i, r in enumerate(dsr):
+            if i in adj:
+                r['G_p_boot'] = round(r['_p_G'], 4)
+                r['G_p_holm'] = round(adj[i], 4)
+                r['G_v|t'] = r['G_v|t'].rstrip('*') + (' (Holm p={:.3f})'.format(adj[i]))
+    for r in dsr:
+        r.pop('_p_G', None)
     write_csv(os.path.join(args.out, 'table_datasets.csv'), dsr)
-    md = ['| dataset | users | items | interactions | density % | kNN image | kNN text | kNN null | pop | G[v|t] |',
-          '|---|---|---|---|---|---|---|---|---|---|']
+    md = ['| dataset | users | items | interactions | density % | kNN image | kNN perm-image | kNN text | kNN null | pop | G[v|t] |',
+          '|---|---|---|---|---|---|---|---|---|---|---|']
     for r in dsr:
         fmt = lambda v: '{:.4f}'.format(v) if isinstance(v, float) else (str(v) if v != '' else '·')
-        md.append('| {} | {:,} | {:,} | {:,} | {} | {} | {} | {} | {} | {} |'.format(
+        md.append('| {} | {:,} | {:,} | {:,} | {} | {} | {} | {} | {} | {} | {} |'.format(
             r['dataset'], r['users'], r['items'], r['interactions'], r['density_%'], fmt(r.get('knn_image', '')),
-            fmt(r.get('knn_text', '')), fmt(r.get('knn_null', '')), fmt(r.get('knn_pop', '')), r.get('G_v|t', '·')))
+            fmt(r.get('knn_vperm', '')), fmt(r.get('knn_text', '')), fmt(r.get('knn_null', '')), fmt(r.get('knn_pop', '')), r.get('G_v|t', '·')))
     open(os.path.join(args.out, 'table_datasets.md'), 'w').write('\n'.join(md) + '\n')
 
     write_csv(os.path.join(args.out, 'provenance.csv'), PROV)
