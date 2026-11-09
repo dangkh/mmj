@@ -70,6 +70,6 @@ while IFS= read -r LINE || [ -n "$LINE" ]; do
     [ "$N" -gt 0 ] && sleep "$STAGGER"
     run_task "$@" &
     N=$((N + 1))
-done < "$TASK_FILE"
+done < <(awk 'NF && !seen[$0]++' "$TASK_FILE")      # a task listed twice runs once
 while [ "$(jobs -rp | wc -l)" -gt 0 ]; do wait -n || FAIL=$((FAIL + 1)); done
 echo "Worker finished: tasks=$N failed=$FAIL"

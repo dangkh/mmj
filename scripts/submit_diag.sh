@@ -35,6 +35,9 @@
 # Tasks of the same data folder go to the same job (they share the graph cache), started 2 min apart.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+command -v python >/dev/null 2>&1 || {
+    echo "python not found: activate the environment first (source ~/miniconda3/etc/profile.d/conda.sh && conda activate Astar)"
+    exit 1; }
 
 DATASETS="${*:-baby}"
 MODELS="${MODELS:-DRAGON FREEDOM MENTOR}"
@@ -45,7 +48,8 @@ PARALLEL="${PARALLEL:-2}"
 HOURS_PER_TASK="${HOURS_PER_TASK:-2}"
 CONDA_ENV="${CONDA_ENV:-Astar}"
 DRY_RUN="${DRY_RUN:-0}"
-MAX_WALLTIME_H="${MAX_WALLTIME_H:-48}"   # queue limit
+MAX_WALLTIME_H="${MAX_WALLTIME_H:-48}"   # queue limit, whole hours (e.g. 24, not 24h)
+MAX_WALLTIME_H="${MAX_WALLTIME_H%h}"
 MEM="${MEM:-16gb}"                       # host RAM per job (per-user limits count it; lower = easier to schedule)
 JOB_CPUS="${JOB_CPUS:-4}"
 QUEUE="${QUEUE:-small_gpuq}"
@@ -150,7 +154,7 @@ for DS in $DATASETS; do
             *)  # FREEDOM, MENTOR, COHESION, ... and DRAGON on non-Amazon data: tune on the real data first (valid)
                 [ -f "src/configs/model/$M.yaml" ] || { echo "no config src/configs/model/$M.yaml"; exit 1; }
                 TUNE=$(echo "$M" | tr 'A-Z' 'a-z')_grid
-                TUNE_ARGS=""; [ "$M" = COHESION ] && TUNE_ARGS="$COHESION_GRID"; [ "$M" = DRAGON ] && TUNE_ARGS="$DRAGON_GRID"
+                GV="${M}_GRID"; TUNE_ARGS="${!GV:-}"   # COHESION_GRID / DRAGON_GRID (defaults above), MENTOR_GRID, FREEDOM_GRID, ...
                 if ! ARGS=$(python tools/best_params.py "$M" "$DS" "$TUNE"); then
                     echo "  $M on $DS: tuning first ($TUNE ${TUNE_ARGS:-official grid}); re-run this script when it has finished"
                     add "$DS" "$TUNE" "$M" "$DS" 999 $TUNE_ARGS
@@ -173,7 +177,8 @@ N=$(grep -c . "$TODO" || true)
 [ "$N" -gt 0 ] || { echo "Nothing to submit (all done or already queued)."; rm -f "$TODO"; exit 0; }
 
 # ---- split by data folder (largest group first, to the least loaded job)
-STAMP=$(date '+%Y%m%d-%H%M%S'); QDIR="src/log/queue/diag-${STAMP}"; mkdir -p "$QDIR"
+STAMP=$(date '+%Y%m%d-%H%M%S'); mkdir -p src/log/queue
+QDIR=$(mktemp -d "src/log/queue/diag-${STAMP}-XXXX")   # unique even for two submissions in the same second
 W=$(( N < MAX_JOBS ? N : MAX_JOBS ))
 declare -a LOAD; for ((w = 0; w < W; w++)); do LOAD[$w]=0; : > "$QDIR/worker$w.txt"; done
 for G in $(awk '{print $1}' "$TODO" | sort | uniq -c | sort -rn | awk '{print $2}'); do

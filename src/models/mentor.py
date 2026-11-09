@@ -21,6 +21,7 @@ from common.init import xavier_uniform_initialization
 class MENTOR(GeneralRecommender):
     def __init__(self, config, dataset):
         super(MENTOR, self).__init__(config, dataset)
+        self.infonce_chunk = int(config['infonce_chunk'] or 0)   # mmj: row-block size for InfoNCE, 0 = original
 
         num_user = self.n_users
         num_item = self.n_items
@@ -214,8 +215,19 @@ class MENTOR(GeneralRecommender):
         view1, view2 = F.normalize(view1, dim=1), F.normalize(view2, dim=1)
         pos_score = (view1 * view2).sum(dim=-1)
         pos_score = torch.exp(pos_score / temp)
-        ttl_score = torch.matmul(view1, view2.transpose(0, 1))
-        ttl_score = torch.exp(ttl_score / temp).sum(dim=1)
+        chunk = self.infonce_chunk                             # mmj: memory option, 0 = original code path
+        if chunk <= 0 or view1.shape[0] <= chunk:
+            ttl_score = torch.matmul(view1, view2.transpose(0, 1))
+            ttl_score = torch.exp(ttl_score / temp).sum(dim=1)
+        else:
+            # Same row sums, computed in row blocks with activation checkpointing: peak memory
+            # O(chunk x n) instead of O(n x n). Needed for Clothing (39k users: 5.8 GiB per n x n matrix).
+            from torch.utils.checkpoint import checkpoint
+
+            def rows(v1):
+                return torch.exp(torch.matmul(v1, view2.transpose(0, 1)) / temp).sum(dim=1)
+            ttl_score = torch.cat([checkpoint(rows, view1[i:i + chunk], use_reentrant=False)
+                                   for i in range(0, view1.shape[0], chunk)])
         cl_loss = -torch.log(pos_score / ttl_score)
         return torch.mean(cl_loss)
 

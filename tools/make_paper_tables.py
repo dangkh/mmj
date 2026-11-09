@@ -96,6 +96,8 @@ def cell(e, bold=False, tex=False):
     if not e:
         return '·' if not tex else '--'
     s = '{:+.1f}'.format(e['pct'])
+    if tex and s.startswith('-'):
+        s = '$-$' + s[1:]
     if e['sig']:
         s += '$^\\dagger$' if tex else ' †'
     if bold:
