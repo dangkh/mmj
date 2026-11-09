@@ -9,6 +9,8 @@ Every number of the paper, regenerated from the run logs in one command (single 
 Writes to <out>/ (CSV = full precision + provenance; MD = readable; TEX = paste into the paper):
   table1_full.{csv,md,tex}     MAIN TABLE (table*, two columns): per model x dataset, Real / Perm / Const R@20 and
                                N@20 and A / D / T in % of Real (paired t); multirow + booktabs
+  table1_compact.{tex,csv}     same numbers in the R | P | C | dA | dV | dK layout (x1e-3), dataset panels stacked
+                               (--groups), deltas from the displayed means so they add up exactly
   table1_main.{csv,md,tex}     compact variant: A / D / T only, three panels
   table2_robust.{csv,md}       key cells: original, graph-fixed (_tg), independent permutations, ones / constn,
                                per-condition tuning (_ct series), each with A / D / T
@@ -134,7 +136,13 @@ def main():
     ap.add_argument('--full_order', nargs='+', default=['DRAGON', 'MENTOR', 'FREEDOM', 'COHESION'],
                     help='row order of the full table (by architectural family)')
     ap.add_argument('--std', action='store_true', help='full table: add +-std to the raw values')
+    ap.add_argument('--seeds', type=int, nargs='+', default=[999, 1, 2],
+                    help='seeds used everywhere (same n in every cell); e.g. 999 1 2 3 4')
+    ap.add_argument('--groups', default='baby,sports,cloth;ml1m,dbbook',
+                    help='compact table: dataset panels, ";" between panels (e.g. Amazon; non-Amazon)')
     args = ap.parse_args()
+    global SEEDS
+    SEEDS = list(args.seeds)
     os.makedirs(args.out, exist_ok=True)
 
     # ---------------- Table 1 + Figure 1 data + raw appendix
@@ -265,6 +273,56 @@ def main():
     tex += ['\\end{tabular}', '\\end{table*}']
     open(os.path.join(args.out, 'table1_full.tex'), 'w').write('\n'.join(tex) + '\n')
     open(os.path.join(args.out, 'table1_full.md'), 'w').write('\n'.join(md) + '\n')
+
+    # ---------------- Table 1, compact R/P/C layout (x 1e-3, one row per model, dataset panels stacked)
+    groups = [[d for d in g.split(',') if d] for g in args.groups.split(';')]
+    cmp_rows = []
+    tex = ['\\begin{table*}[t]', '\\centering',
+           '\\caption{Recall@20 ($\\times 10^{-3}$, mean over %d seeds) with real (R), permuted (P) and constant (C) '
+           'visual features. $\\Delta_A = R-P$: alignment contrast; $\\Delta_V = P-C$: variation (distinctiveness) '
+           'contrast; $\\Delta_K = R-C = \\Delta_A+\\Delta_V$: knockout effect. $^\\dagger$: paired $t$-test over seeds, '
+           '$p<.05$. --: not run.}' % len(SEEDS), '\\label{tab:main}', '\\scriptsize', '\\setlength{\\tabcolsep}{2.2pt}']
+    for gi, g in enumerate(groups):
+        tex.append('\\begin{tabular}{l*{%d}{rrrrrr}}' % len(g))
+        tex.append('\\toprule')
+        tex.append(' & ' + ' & '.join('\\multicolumn{6}{c}{\\textbf{%s}}' % PRETTY_DS.get(d, d) for d in g) + ' \\\\')
+        tex.append(' '.join('\\cmidrule(lr){%d-%d}' % (2 + 6 * i, 7 + 6 * i) for i in range(len(g))))
+        tex.append('\\textbf{Model} & ' + ' & '.join('R & P & C & $\\Delta_A$ & $\\Delta_V$ & $\\Delta_K$' for _ in g) + ' \\\\')
+        tex.append('\\midrule')
+        for model in full_models:
+            cells = []
+            for d in g:
+                key3 = (model, d, 'test_recall@20')
+                if key3 not in F or not all(F[key3][0][c] for c in ('real', 'perm', 'const')):
+                    cells += ['--'] * 6
+                    continue
+                r, dec = F[key3]
+                # deltas from the displayed (rounded) means, so that R-P, P-C, R-C add up exactly in the table
+                R_, P_, C_ = (round(1000 * mean_std(r[c])[0], 1) for c in ('real', 'perm', 'const'))
+                vals = [(R_ - P_, dec['A']), (P_ - C_, dec['D']), (R_ - C_, dec['T'])]
+                dc = []
+                for (v, e), lab in zip(vals, 'ADT'):
+                    t = '{:+.1f}'.format(v).replace('-', '$-$')
+                    if e and e['sig']:
+                        t += '$^\\dagger$'
+                    if (model, d) in key and lab in 'AD':
+                        t = '\\textbf{%s}' % t
+                    dc.append(t)
+                cells += ['{:.1f}'.format(R_), '{:.1f}'.format(P_), '{:.1f}'.format(C_)] + dc
+                cmp_rows.append({'model': model, 'dataset': d, 'R': R_, 'P': P_, 'C': C_, 'dA': round(R_ - P_, 1),
+                                 'dV': round(P_ - C_, 1), 'dK': round(R_ - C_, 1),
+                                 'sigA': bool(dec['A'] and dec['A']['sig']), 'sigV': bool(dec['D'] and dec['D']['sig']),
+                                 'sigK': bool(dec['T'] and dec['T']['sig']),
+                                 'n': min(len(r[c]) for c in ('real', 'perm', 'const'))})
+            if any(c != '--' for c in cells):
+                tex.append('{} & {} \\\\'.format(model, ' & '.join(cells)))
+        tex.append('\\bottomrule')
+        tex.append('\\end{tabular}')
+        if gi < len(groups) - 1:
+            tex.append('\\\\[3pt]')
+    tex.append('\\end{table*}')
+    open(os.path.join(args.out, 'table1_compact.tex'), 'w').write('\n'.join(tex) + '\n')
+    write_csv(os.path.join(args.out, 'table1_compact.csv'), cmp_rows)
 
     # ---------------- Figure 1: A vs T
     fig_rows = []
@@ -409,8 +467,13 @@ def main():
                 users.add(x[iu]); items.add(x[ii]); n += 1
         row = {'dataset': PRETTY_DS.get(ds, ds), 'users': len(users), 'items': len(items), 'interactions': n,
                'density_%': round(100 * n / (len(users) * len(items)), 3)}
-        for pj in sorted(glob.glob('log/probe_knn_{}_*.json'.format(ds)), key=os.path.getmtime, reverse=True):
-            R = json.load(open(pj)).get('results', {})
+        cands = sorted(glob.glob('log/probe_knn_{}_*.json'.format(ds)), key=os.path.getmtime, reverse=True)
+        cands = [p for p in cands if p.endswith('_t0.json')] + [p for p in cands if not p.endswith('_t0.json')]
+        for pj in cands:
+            J = json.load(open(pj))
+            if J.get('args', {}).get('dataset') != ds:        # e.g. probe_knn_baby_vlm_* also matches baby_*
+                continue
+            R = J.get('results', {})
             if 'x_v' in R and 'x_t' in R:
                 row.update({'knn_image': R['x_v']['recall'], 'knn_text': R['x_t']['recall'],
                             'knn_null': R.get('null64', {}).get('recall', ''), 'knn_pop': R.get('pop', {}).get('recall', ''),
