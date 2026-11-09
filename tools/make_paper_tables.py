@@ -508,17 +508,28 @@ def main():
         row = {'dataset': PRETTY_DS.get(ds, ds), 'users': len(users), 'items': len(items), 'interactions': n,
                'density_%': round(100 * n / (len(users) * len(items)), 3)}
         cands = sorted(glob.glob('log/probe_knn_{}_*.json'.format(ds)), key=os.path.getmtime, reverse=True)
-        cands = [p for p in cands if p.endswith('_t0.json')] + [p for p in cands if not p.endswith('_t0.json')]
+        t0 = lambda p: p.lower().endswith('_t0.json')          # default tag is 'T0'
+        cands = [p for p in cands if t0(p)] + [p for p in cands if not t0(p)]
         for pj in cands:
             J = json.load(open(pj))
             if J.get('args', {}).get('dataset') != ds:        # e.g. probe_knn_baby_vlm_* also matches baby_*
                 continue
             R = J.get('results', {})
             if 'x_v' in R and 'x_t' in R:
-                G = J.get('derived', {}).get('G[x_v|x_t]', {})
-                if G:
-                    lo, hi = G.get('ci', [0, 0])
-                    row['G_v|t'] = '{:+.4f}{}'.format(G['gain'], '*' if lo > 0 or hi < 0 else '')
+                D = J.get('derived', {}) or {}
+                G = D.get('G[x_v|x_t]')
+                # current probe_knn: {'gain': g, 'ci': [lo, hi]}; older files stored a bare float (+ maybe '<key>_ci')
+                if isinstance(G, dict):
+                    g, ci = G.get('gain'), G.get('ci')
+                elif isinstance(G, (int, float)):
+                    g, ci = float(G), D.get('G[x_v|x_t]_ci') or D.get('G[x_v|x_t]_CI')
+                else:
+                    g, ci = None, None
+                if g is None and 'x_v+x_t' in R:          # derive it from the results if needed (no CI then)
+                    g = R['x_v+x_t']['recall'] - R['x_t']['recall']
+                if g is not None:
+                    sig = isinstance(ci, (list, tuple)) and len(ci) == 2 and (ci[0] > 0 or ci[1] < 0)
+                    row['G_v|t'] = '{:+.4f}{}'.format(g, '*' if sig else ('' if ci else ' (no CI)'))
                 row.update({'knn_image': R['x_v']['recall'], 'knn_text': R['x_t']['recall'],
                             'knn_null': R.get('null64', {}).get('recall', ''), 'knn_pop': R.get('pop', {}).get('recall', ''),
                             'probe_file': pj})
