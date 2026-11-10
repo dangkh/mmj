@@ -14,6 +14,8 @@
 #   Per-condition tuning (each control tuned on its own, a robustness check of the shared-HP protocol):
 #   FORCE_TUNE=1 RUN_TAG=_ct CONDS=real MODELS=DRAGON bash scripts/submit_diag.sh cloth cloth_vperm cloth_vconst
 #     (each folder is treated as a dataset: <model>_grid tuned on it, then <model>_ct_s<seed> runs)
+#   GRID_TAG=_ct FORCE_TUNE=1 RUN_TAG=_ct CONDS=real MODELS=COHESION bash scripts/submit_diag.sh dbbook
+#     (Real re-tuned on the same grid as the controls, as <model>_grid_ct, then <model>_ct_s<seed> on the real folder)
 #
 # Two stages, both handled by re-running the same command:
 #   1. FREEDOM / MENTOR are first tuned on the real data with their official grid (name freedom_grid /
@@ -57,6 +59,7 @@ MEM="${MEM:-16gb}"                       # host RAM per job (per-user limits cou
 JOB_CPUS="${JOB_CPUS:-4}"
 QUEUE="${QUEUE:-small_gpuq}"
 FORCE_TUNE="${FORCE_TUNE:-0}"
+GRID_TAG="${GRID_TAG:-}"      # e.g. GRID_TAG=_ct: tune Real again on the grid used for the controls (<model>_grid_ct)
 EXTRA_ARGS="${EXTRA_ARGS:-}"             # appended to every task (tuning and runs), e.g. --infonce_chunk=4096            # 1: tune every model (DRAGON too) on each given data folder
 RUN_TAG="${RUN_TAG:-}"                   # e.g. _ct: runs named <model>_ct_s<seed> (own series, no clash)             # e.g. QUEUE=<medium gpu queue> when it has free GPUs (qstat -Q lists queues)
 TAPPED=" DRAGON DRAGONID FREEDOM MENTOR LightGCN "   # models with a tap adapter (src/taps.py); others: Recall only
@@ -161,7 +164,7 @@ for DS in $DATASETS; do
             DRAGON:0) ;;
             *)  # FREEDOM, MENTOR, COHESION, ... and DRAGON on non-Amazon data: tune on the real data first (valid)
                 [ -f "src/configs/model/$M.yaml" ] || { echo "no config src/configs/model/$M.yaml"; exit 1; }
-                TUNE=$(echo "$M" | tr 'A-Z' 'a-z')_grid
+                TUNE=$(echo "$M" | tr 'A-Z' 'a-z')_grid${GRID_TAG}   # GRID_TAG=_ct: a fresh grid run next to an existing one
                 GV="${M}_GRID"; TUNE_ARGS="${!GV:-}"   # COHESION_GRID / DRAGON_GRID (defaults above), MENTOR_GRID, FREEDOM_GRID, ...
                 if ! ARGS=$(python tools/best_params.py "$M" "$DS" "$TUNE"); then
                     echo "  $M on $DS: tuning first ($TUNE ${TUNE_ARGS:-official grid}); re-run this script when it has finished"
