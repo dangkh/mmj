@@ -18,16 +18,17 @@ MEM="${MEM:-16gb}"
 NCPUS="${NCPUS:-8}"
 WALLTIME="${WALLTIME:-24:00:00}"
 SMOKE="${SMOKE:-0}"
-[ "$SMOKE" = "1" ] && WALLTIME="${SMOKE_WALLTIME:-01:00:00}"
+SUF=""
+if [ "$SMOKE" = "1" ]; then WALLTIME="${SMOKE_WALLTIME:-01:00:00}"; SUF="_smoke"; fi
 mkdir -p results/jepay_diag/logs
 for DS in $DATASETS; do
     [ -f "data/$DS/$DS.inter" ] || { echo "skip $DS: data/$DS/$DS.inter not found"; continue; }
     [ -f "src/configs/dataset/$DS.yaml" ] || { echo "skip $DS: src/configs/dataset/$DS.yaml not found"; continue; }
     VARS="DS=$DS,SMOKE=$SMOKE"
-    [ -n "${TEACHER_ARGS:-}" ] && VARS="$VARS,TEACHER_ARGS=$TEACHER_ARGS"
+    if [ -n "${TEACHER_ARGS:-}" ]; then VARS="$VARS,TEACHER_ARGS=$TEACHER_ARGS"; fi
     CMD=(qsub -q "$QUEUE" -N "jepay_$DS" -l "select=1:ncpus=$NCPUS:ngpus=1:mem=$MEM" -l "walltime=$WALLTIME"
-         -o "results/jepay_diag/logs/jepay_${DS}$([ "$SMOKE" = 1 ] && echo _smoke).log" -j oe -v "$VARS"
+         -o "results/jepay_diag/logs/jepay_${DS}${SUF}.log" -j oe -v "$VARS"
          scripts/jepay_diag.pbs)
     echo "${CMD[*]}"
-    [ "${DRY_RUN:-0}" = "1" ] || "${CMD[@]}"
+    if [ "${DRY_RUN:-0}" != "1" ]; then "${CMD[@]}"; fi
 done
