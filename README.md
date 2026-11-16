@@ -69,3 +69,24 @@ neighbourhood size, chosen on valid), so there is no capacity/dimension differen
 no loss over unobserved zeros and no memorisation (null64 is at chance). Same test protocol as MMRec.
 The ridge probe (`tools/probe_rec.py`) learns a readout W and can learn CF even from noise in its
 warm mode; keep it for the appendix only.
+
+## JEPA-Y diagnosis (E-A)
+
+Does the part of the visual signal that text does not explain (Z_v = h_v - sg(P(h_t))) help predict a frozen
+collaborative item embedding Y (LightGCN, train interactions)? Datasets: baby, ml1m, dbbook.
+
+```bash
+SMOKE=1 bash scripts/submit_jepay.sh baby          # quick check first (3 epochs, seed 0, head mlp1)
+bash scripts/submit_jepay.sh                       # baby ml1m dbbook: one job each, all steps sequential
+python tools/summarize_jepay_diag.py --all baby ml1m dbbook    # M1-M8, Holm, gate, figures -> paper/
+python tools/export_jepay_feat.py -d baby --rg     # E-B-lite folders data/baby_jepay_{hv,z,znoy,zlin,zperm}[_rg]
+```
+
+| File | Role |
+|---|---|
+| `tools/export_teacher.py` | LightGCN teacher (taps T3 / T3_user) -> `data/<ds>/teacher_{Y,U}.npy` |
+| `tools/make_item_split.py` | item split 80/10/10 stratified by train degree (seed 2026) + nested 25/50 % subsets |
+| `tools/jepay/` | data (scalers / PCA_k / OLS on train items only), model (A0, A1, A2 = F_phi + decoder, A2sub, A2noJ, A2noY), probe (stage B: lin / mlp1 / mlp2 on frozen representations), metrics (M3-M8, bootstrap, Holm) |
+| `tools/jepay_diag.py` | `--grid` (stage A), `--matrix` (stage A + probes) or one run; results in `results/jepay_diag/<ds>/` |
+| `tools/summarize_jepay_diag.py` | tables and figures |
+| `tools/export_jepay_feat.py` | frozen JEPA-Y features as image features (`make_control_data.py --mode file`) |

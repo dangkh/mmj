@@ -14,6 +14,8 @@ Each control folder gets control_meta.json (mode, seed, ...), read by tools/audi
 permutations: --mode perm --seed <s> --suffix _p<k> (scripts/submit_diag.sh conditions perm2 ... perm5).
     copy  : the real features unchanged (a clean copy with its own graph cache, e.g. to train with
             --mm_image_weight=0.0 without touching the cache of the original folder)
+    file  : the rows of --feat (an .npy with one row per item), e.g. JEPA-Y features for E-B-lite
+            (tools/export_jepay_feat.py):  --mode file --feat Z.npy --name baby_jepay_z
 
 real - perm  = what the CONTENT contributes;  perm - const = what the features contribute only as
 an item IDENTITY (memorisation by the trained projection).
@@ -42,7 +44,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('-d', '--dataset', default='baby')
     ap.add_argument('--modality', choices=['v', 't'], default='v')
-    ap.add_argument('--mode', choices=['perm', 'noise', 'const', 'constn', 'ones', 'gauss', 'copy'], default='perm')
+    ap.add_argument('--mode', choices=['perm', 'noise', 'const', 'constn', 'ones', 'gauss', 'copy', 'file'],
+                    default='perm')
+    ap.add_argument('--feat', default=None, help='file mode: .npy with the new feature rows')
+    ap.add_argument('--name', default=None, help='folder / dataset name (default <ds>_<modality><mode>...)')
     ap.add_argument('--suffix', default='', help='appended to the folder name, e.g. _rg')
     ap.add_argument('--reuse_graph', action='store_true',
                     help="copy the original folder's cached item-item graphs (*adj*.pt) into the new one, so the "
@@ -60,7 +65,9 @@ def main():
     args = ap.parse_args()
 
     src = os.path.join(args.data_dir, args.dataset)
-    name = '{}_{}{}{}{}'.format(args.dataset, args.modality, args.mode, args.dim or '', args.suffix)
+    name = args.name or '{}_{}{}{}{}'.format(args.dataset, args.modality, args.mode, args.dim or '', args.suffix)
+    if args.mode == 'file' and not args.feat:
+        raise SystemExit('--mode file needs --feat')
     if args.dim and args.mode != 'noise':
         raise SystemExit('--dim only applies to --mode noise')
     dst = os.path.join(args.data_dir, name)
@@ -87,6 +94,10 @@ def main():
     rng = np.random.default_rng(args.seed)
     if args.mode == 'copy':
         Y = X
+    elif args.mode == 'file':
+        Y = np.load(args.feat).astype(np.float32)
+        if Y.shape[0] != X.shape[0] or not np.isfinite(Y).all():
+            raise SystemExit('{}: {} rows (need {}) or non-finite values'.format(args.feat, Y.shape[0], X.shape[0]))
     elif args.mode == 'perm':
         perm = rng.permutation(X.shape[0])
         Y = X[perm]
@@ -116,7 +127,8 @@ def main():
     import json
     with open(os.path.join(dst, 'control_meta.json'), 'w') as f:
         json.dump({'source': args.dataset, 'modality': args.modality, 'mode': args.mode, 'seed': args.seed,
-                   'dim': args.dim, 'scale': args.scale, 'suffix': args.suffix}, f, indent=1)
+                   'dim': args.dim, 'scale': args.scale, 'suffix': args.suffix,
+                   'feat': os.path.abspath(args.feat) if args.feat else None}, f, indent=1)
 
     if args.reuse_graph:
         import glob

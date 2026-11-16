@@ -9,3 +9,4 @@ src/recommend_topk/
 data/
 results_*.csv
 *.o[0-9]*
+results/

@@ -1,0 +1,43 @@
+#!/bin/bash
+#PBS -N jepay_diag
+#PBS -q small_gpuq
+#PBS -l select=1:ncpus=8:ngpus=1:mem=16gb
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#
+# JEPA-Y diagnosis E-A for one dataset, everything sequential in one job (plan_diag.md):
+#   teacher (LightGCN, train interactions) -> item split -> grid -> matrix -> summary
+# Every step skips what is already finished, so a requeued / resubmitted job continues where it stopped.
+#
+#   qsub -v DS=baby scripts/jepay_diag.pbs
+#   qsub -v DS=ml1m,TEACHER_ARGS="--n_layers=3 --reg_weight=0.0001" scripts/jepay_diag.pbs   # fixed teacher setting
+#   qsub -v DS=baby,SMOKE=1 -l walltime=01:00:00 scripts/jepay_diag.pbs                    # quick check
+# (scripts/submit_jepay.sh submits several datasets.)
+
+cd "$PBS_O_WORKDIR" || exit 1
+source "$HOME/miniconda3/etc/profile.d/conda.sh"
+conda activate "${CONDA_ENV:-Astar}"
+export OMP_NUM_THREADS="${NCPUS:-8}"
+[ -n "${DS:-}" ] || { echo "DS not set (qsub -v DS=baby ...)"; exit 1; }
+SMOKE_ARG=""; [ "${SMOKE:-0}" = "1" ] && SMOKE_ARG="--smoke"
+LOG_DIR="results/jepay_diag/logs"; mkdir -p "$LOG_DIR"
+echo "Job $PBS_JOBID on $(hostname), dataset $DS, $(date '+%F %T') ${SMOKE_ARG}"
+nvidia-smi
+
+step() {   # step NAME CMD...
+    local NAME=$1; shift
+    echo "===== [$(date '+%F %T')] $NAME: $* ====="
+    "$@"
+    local rc=$?
+    echo "===== [$(date '+%F %T')] $NAME rc=$rc ====="
+    return $rc
+}
+
+step teacher python -u tools/export_teacher.py -d "$DS" ${TEACHER_ARGS:+--teacher_args "$TEACHER_ARGS"} || exit 1
+step split   python -u tools/make_item_split.py -d "$DS" || exit 1
+step grid    python -u tools/jepay_diag.py -d "$DS" --grid $SMOKE_ARG || exit 1
+step matrix  python -u tools/jepay_diag.py -d "$DS" --matrix $SMOKE_ARG || echo "some runs failed: see above"
+if [ -z "$SMOKE_ARG" ]; then
+    step summary python -u tools/summarize_jepay_diag.py -d "$DS"
+fi
+echo "Done $(date '+%F %T')"
