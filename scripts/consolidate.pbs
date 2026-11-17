@@ -9,7 +9,7 @@
 # them with dependencies). Steps (STEP):
 #   teacher   SRC=id|text: LightGCNC with the best setting of the teacher study (log <SRC>_grid), seed 999,
 #             --save_taps=True -> taps/LightGCNC-<DS>-teacher_<SRC>
-#   grid      MODES = B2 | B3 | B2d | B3d | IDcorr, optional LAMJ=0.1|1 (B3/B3d): grid on valid with the first
+#   grid      MODES = B2 | B3 | B2d | B3d | IDcorr | CAT | GATE | SF, optional LAMJ=0.1|1 (B3/B3d): grid on valid with the first
 #             seed of SEEDS (default 999); no extra seeds
 #   finals    best setting per mode over ALL finished grid runs, run for every seed of SEEDS, then summary
 #   summary   table only (results/consolidate/<DS>/summary.md)
@@ -47,7 +47,7 @@ case "$STEP" in
         "${CONS[@]}" --grid --no_finals --modes "${MODES:-B2 B3}" ${LAMJ:+--fix "lam_J=$LAMJ"} || exit 1
         ;;
     finals)
-        "${CONS[@]}" --grid --modes "${MODES:-B2 B3 B2d B3d IDcorr}" || exit 1
+        "${CONS[@]}" --grid --modes "${MODES:-B2 B3 B2d B3d IDcorr CAT GATE SF}" || exit 1
         ;;
     summary)
         "${CONS[@]}" --summary || exit 1

@@ -18,6 +18,13 @@ Both are frozen. Only the correction Delta_T is trained, with BPR on the train i
     IDcorr  control without any text: the same modules on ID inputs only,
             S = E_T(Y_id[i]), Z_i = C([S ; Y_id[i]]), g_u = G([U_id[u] ; U_id[u]])  (same parameter count)
     g_u     = G([U_id[u] ; U_t[u]])                        user side, no free user table (IDcorr: U_id twice)
+Fusion baselines on the same frozen teachers (no s_ID shortcut):
+    CAT     concat -> MLP: e_u = F_u([U_id; U_t]), e_i = F_i([Y_id; Y_t]), s = <e_u, e_i>
+    GATE    learned weighted fusion: e = g * A_id(id) + (1 - g) * A_t(text), g = sigmoid(MLP([id; text]))
+            per dimension, separately for users and items; A_* linear initialised to the identity
+    SF      score-level fusion: s = (1 - a) z(s_ID) + a z(s_T), a in {0, 0.05, ..., 1} chosen on valid
+            (z = standardised scores); no training
+    CAT and GATE use the grid of B2 (lam_D = L2 weight on the fused embeddings) x lr: same budget.
     L = BPR(s) + lam_J L_J + lam_D E[Delta_T^2]
 
 B2 and B3 have the same modules and parameter count (P exists in B2 but receives no gradient). The last
@@ -53,26 +60,57 @@ from probe_knn import evaluate          # noqa: E402
 GRID = {'B2': {'lam_D': [0.0, 1e-3, 1e-2, 1e-1], 'lr': [1e-3, 1e-4]},
         'B3': {'lam_D': [0.0, 1e-3, 1e-2, 1e-1], 'lr': [1e-3, 1e-4], 'lam_J': [0.1, 1.0]}}
 GRID['B2d'], GRID['B3d'], GRID['IDcorr'] = GRID['B2'], GRID['B3'], GRID['B2']
-MODES = ('B2', 'B3', 'B2d', 'B3d', 'IDcorr')
+GRID['CAT'], GRID['GATE'] = GRID['B2'], GRID['B2']      # lam_D = L2 weight on the fused embeddings here
+MODES = ('B2', 'B3', 'B2d', 'B3d', 'IDcorr', 'CAT', 'GATE')
+CORR_MODES = ('B2', 'B3', 'B2d', 'B3d', 'IDcorr')
+SF_GRID = [round(0.05 * k, 2) for k in range(21)]          # score fusion weight of the text teacher
 
 
 def mlp(d_in, d_hid, d_out):
     return nn.Sequential(nn.Linear(d_in, d_hid), nn.LeakyReLU(), nn.Linear(d_hid, d_out))
 
 
+def eye_linear(d):
+    lin = nn.Linear(d, d)
+    nn.init.eye_(lin.weight)
+    nn.init.zeros_(lin.bias)
+    return lin
+
+
 class Consolidator(nn.Module):
+    """Correction modes (B2, B3, B2d, B3d, IDcorr): s = s_ID + Delta, see the module docstring.
+    Fusion baselines on the same frozen teachers (no s_ID shortcut, no Delta = 0 start):
+      CAT   e_u = F_u([U_id; U_t]), e_i = F_i([Y_id; Y_t]) (2-layer MLPs), s = <e_u, e_i>
+      GATE  e_i = g_i * A_id(Y_id) + (1 - g_i) * A_t(Y_t), g_i = sigmoid(MLP([Y_id; Y_t])) per dimension;
+            same for users with their own gate; A_* linear, initialised to the identity; s = <e_u, e_i>
+    pair_scores returns (score, penalty): penalty = Delta^2 (corrections) or ||e_u||^2 + ||e_i||^2 (CAT, GATE)."""
+
     def __init__(self, U_id, Y_id, U_t, Y_t, mode, d=64, hidden=256):
         super(Consolidator, self).__init__()
         self.mode = mode
         for name, x in (('U_id', U_id), ('Y_id', Y_id), ('U_t', U_t), ('Y_t', Y_t)):
             self.register_buffer(name, x)                       # frozen teachers
-        self.E_T = mlp(Y_t.shape[1], hidden, d)
-        self.P = mlp(Y_id.shape[1], hidden, d)
-        self.C = mlp(d + Y_id.shape[1], hidden, d)
-        self.G = mlp(U_id.shape[1] + U_t.shape[1], hidden, d)
-        nn.init.zeros_(self.G[-1].weight)                       # Delta_T = 0 at start (model = B0)
-        nn.init.zeros_(self.G[-1].bias)
+        du, di = U_id.shape[1] + U_t.shape[1], Y_id.shape[1] + Y_t.shape[1]
+        if mode in CORR_MODES:
+            self.E_T = mlp(Y_t.shape[1], hidden, d)
+            self.P = mlp(Y_id.shape[1], hidden, d)
+            self.C = mlp(d + Y_id.shape[1], hidden, d)
+            self.G = mlp(du, hidden, d)
+            nn.init.zeros_(self.G[-1].weight)                   # Delta_T = 0 at start (model = B0)
+            nn.init.zeros_(self.G[-1].bias)
+        elif mode == 'CAT':
+            self.F_u = mlp(du, hidden, d)
+            self.F_i = mlp(di, hidden, d)
+        elif mode == 'GATE':
+            assert U_id.shape[1] == U_t.shape[1] == Y_id.shape[1] == Y_t.shape[1], 'GATE needs equal teacher dims'
+            k = Y_id.shape[1]
+            self.A_uid, self.A_ut, self.A_iid, self.A_it = eye_linear(k), eye_linear(k), eye_linear(k), eye_linear(k)
+            self.gate_u = mlp(du, hidden, k)
+            self.gate_i = mlp(di, hidden, k)
+        else:
+            raise ValueError(mode)
 
+    # ---------------------------------------------------------------- corrections
     def item_side(self, items=None):
         y_t = self.Y_t if items is None else self.Y_t[items]
         y_id = self.Y_id if items is None else self.Y_id[items]
@@ -91,12 +129,44 @@ class Consolidator(nn.Module):
         u_t = self.U_t if users is None else self.U_t[users]
         return self.G(torch.cat([u_id, u_t], 1))
 
-    def scores(self, users, items):
-        """Pairwise s_ID + Delta for aligned (users, items) vectors."""
-        g = self.user_side(users)
-        z, _, _ = self.item_side(items)
-        delta = (g * z).sum(1)
-        return (self.U_id[users] * self.Y_id[items]).sum(1) + delta, delta
+    # ---------------------------------------------------------------- fusion baselines
+    def fused_user(self, users=None):
+        u_id = self.U_id if users is None else self.U_id[users]
+        u_t = self.U_t if users is None else self.U_t[users]
+        x = torch.cat([u_id, u_t], 1)
+        if self.mode == 'CAT':
+            return self.F_u(x)
+        g = torch.sigmoid(self.gate_u(x))
+        return g * self.A_uid(u_id) + (1 - g) * self.A_ut(u_t)
+
+    def fused_item(self, items=None):
+        y_id = self.Y_id if items is None else self.Y_id[items]
+        y_t = self.Y_t if items is None else self.Y_t[items]
+        x = torch.cat([y_id, y_t], 1)
+        if self.mode == 'CAT':
+            return self.F_i(x)
+        g = torch.sigmoid(self.gate_i(x))
+        return g * self.A_iid(y_id) + (1 - g) * self.A_it(y_t)
+
+    # ---------------------------------------------------------------- scores
+    def pair_scores(self, users, items):
+        if self.mode in CORR_MODES:
+            g = self.user_side(users)
+            z, _, _ = self.item_side(items)
+            delta = (g * z).sum(1)
+            return (self.U_id[users] * self.Y_id[items]).sum(1) + delta, delta.pow(2)
+        eu, ei = self.fused_user(users), self.fused_item(items)
+        return (eu * ei).sum(1), eu.pow(2).sum(1) + ei.pow(2).sum(1)
+
+    def eval_cache(self):
+        if self.mode in CORR_MODES:
+            return self.item_side()[0]
+        return self.fused_item()
+
+    def full_scores(self, users, cache):
+        if self.mode in CORR_MODES:
+            return self.U_id[users] @ self.Y_id.T + self.user_side(users) @ cache.T
+        return self.fused_user(users) @ cache.T
 
 
 def load_taps(path):
@@ -119,22 +189,59 @@ def sample_triples(R_tr, n, rng):
     return u, p, neg
 
 
+def ranking(score_fn, R_tr, R_gt, R_mask):
+    out = {}
+    for k in (10, 20):
+        r, n = evaluate(score_fn, R_tr, R_gt, R_mask, k=k)
+        out['recall@{}'.format(k)], out['ndcg@{}'.format(k)] = float(r.mean()), float(n.mean())
+    return out
+
+
 @torch.no_grad()
 def rank_eval(model, R_tr, R_gt, R_mask, device, delta=True):
+    """delta=False: the frozen ID teacher alone (B0)."""
     model.eval()
-    z = model.item_side()[0] if delta else None
+    cache = model.eval_cache() if delta else None
 
     def score(ub):
         t = torch.from_numpy(ub).long().to(device)
-        s = model.U_id[t] @ model.Y_id.T
-        if delta:
-            s = s + model.user_side(t) @ z.T
+        s = model.full_scores(t, cache) if delta else model.U_id[t] @ model.Y_id.T
         return s.cpu().numpy()
-    out = {}
-    for k in (10, 20):
-        r, n = evaluate(score, R_tr, R_gt, R_mask, k=k)
-        out['recall@{}'.format(k)], out['ndcg@{}'.format(k)] = float(r.mean()), float(n.mean())
-    return out
+    return ranking(score, R_tr, R_gt, R_mask)
+
+
+@torch.no_grad()
+def score_fusion(mats, teachers, device, log=print):
+    """Baseline SF: s = (1 - a) s_ID + a s_T with the two frozen teachers; a in SF_GRID chosen on valid R@20.
+    Scores are z-normalised per teacher (mean / std over a sample of user-item pairs) so that a is comparable."""
+    R_tr, R_va, R_te = mats
+    R_trva = (R_tr + R_va).tocsr()
+    R_trva.data[:] = 1.0
+    U_id, Y_id, U_t, Y_t = [torch.from_numpy(x).to(device) for x in teachers]
+    g = torch.Generator(device='cpu').manual_seed(0)
+    su = torch.randint(0, U_id.shape[0], (20000,), generator=g).to(device)
+    si = torch.randint(0, Y_id.shape[0], (20000,), generator=g).to(device)
+    st = {}
+    for name, U, Y in (('id', U_id, Y_id), ('t', U_t, Y_t)):
+        v = (U[su] * Y[si]).sum(1)
+        st[name] = (float(v.mean()), float(v.std()))
+
+    def make(a):
+        def score(ub):
+            t = torch.from_numpy(ub).long().to(device)
+            s_id = (U_id[t] @ Y_id.T - st['id'][0]) / st['id'][1]
+            s_t = (U_t[t] @ Y_t.T - st['t'][0]) / st['t'][1]
+            return ((1 - a) * s_id + a * s_t).cpu().numpy()
+        return score
+    curve = []
+    for a in SF_GRID:
+        va = ranking(make(a), R_tr, R_va, R_tr)
+        curve.append({'a': a, 'valid': va})
+        log('  SF a={:.2f} valid R@20 {:.4f}'.format(a, va['recall@20']))
+    best = max(curve, key=lambda c: c['valid']['recall@20'])
+    test = ranking(make(best['a']), R_tr, R_te, R_trva)
+    return {'mode': 'SF', 'cfg': {'a': best['a']}, 'seed': 0, 'best_epoch': '-', 'valid': best['valid'],
+            'test': test, 'curve': curve, 'norm': st}
 
 
 def train(args, mats, teachers, mode, cfg, seed, device, log=print):
@@ -146,9 +253,9 @@ def train(args, mats, teachers, mode, cfg, seed, device, log=print):
     model = Consolidator(*[torch.from_numpy(x).to(device) for x in teachers], mode=mode, d=args.d,
                          hidden=args.hidden).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=cfg['lr'])
-    best = rank_eval(model, R_tr, R_va, R_tr, device)          # epoch 0: Delta = 0, i.e. B0
+    best = rank_eval(model, R_tr, R_va, R_tr, device)          # epoch 0 (corrections: Delta = 0, i.e. B0)
     best_ep, best_state, bad, hist = 0, copy.deepcopy(model.state_dict()), 0, []
-    log('  epoch 0 (= B0) valid R@20 {:.4f}'.format(best['recall@20']))
+    log('  epoch 0 valid R@20 {:.4f}'.format(best['recall@20']))
     n_per_epoch = R_tr.nnz
     for ep in range(1, args.epochs + 1):
         model.train()
@@ -158,10 +265,11 @@ def train(args, mats, teachers, mode, cfg, seed, device, log=print):
             ub = torch.from_numpy(u[s:s + args.batch]).long().to(device)
             pb = torch.from_numpy(p[s:s + args.batch]).long().to(device)
             nb = torch.from_numpy(n[s:s + args.batch]).long().to(device)
-            sp, dp = model.scores(ub, pb)
-            sn, dn = model.scores(ub, nb)
+            sp, dp = model.pair_scores(ub, pb)
+            sn, dn = model.pair_scores(ub, nb)
             bpr = -F.logsigmoid(sp - sn).mean()
-            loss = bpr + cfg['lam_D'] * 0.5 * (dp.pow(2).mean() + dn.pow(2).mean())
+            pen = 0.5 * (dp.mean() + dn.mean())
+            loss = bpr + cfg['lam_D'] * pen
             if mode in ('B3', 'B3d') and cfg['lam_J'] > 0:
                 items = torch.cat([pb, nb]).unique()
                 _, s_t, s_hat = model.item_side(items)
@@ -172,7 +280,7 @@ def train(args, mats, teachers, mode, cfg, seed, device, log=print):
             loss.backward()
             opt.step()
             tot['bpr'] += float(bpr)
-            tot['D'] += float(0.5 * (dp.pow(2).mean() + dn.pow(2).mean()))
+            tot['D'] += float(pen)
         if ep % args.eval_every:
             continue
         va = rank_eval(model, R_tr, R_va, R_tr, device)
@@ -202,9 +310,9 @@ def main():
     ap.add_argument('--id_taps', required=True)
     ap.add_argument('--text_taps', required=True)
     ap.add_argument('--out_dir', default=os.path.join(ROOT, 'results', 'consolidate'))
-    ap.add_argument('--mode', choices=list(MODES), default='B3')
+    ap.add_argument('--mode', choices=list(MODES) + ['SF'], default='B3')
     ap.add_argument('--grid', action='store_true', help='grid on valid for B2 and B3 with the first of --seeds, then the other seeds for the best setting')
-    ap.add_argument('--modes', default='B2 B3', help='modes of the grid, e.g. "B2" or "B3" (separate jobs)')
+    ap.add_argument('--modes', default='B2 B3', help='modes of the grid, e.g. "B2", "CAT GATE SF" (separate jobs)')
     ap.add_argument('--fix', default='', help='restrict the grid, e.g. "lam_J=0.1" or "lam_J=1 lr=0.001"')
     ap.add_argument('--no_finals', action='store_true', help='grid only (seed = first of --seeds); no other seeds')
     ap.add_argument('--summary', action='store_true', help='no training: table from the finished runs in out_dir')
@@ -267,7 +375,23 @@ def main():
             r['test']['ndcg@20']), flush=True)
         return r
 
+    def run_sf():
+        f = os.path.join(out, 'SF.json')
+        if os.path.isfile(f):
+            return json.load(open(f))
+        print('[SF] score fusion of the two frozen teachers', flush=True)
+        r = score_fusion(mats, teachers, device)
+        tmp_path = '{}.{}.tmp'.format(f, os.getpid())
+        json.dump(r, open(tmp_path, 'w'), indent=1)
+        os.replace(tmp_path, f)
+        print('[SF] a = {}: valid R@20 {:.4f} | test R@20 {:.4f} N@20 {:.4f}'.format(
+            r['cfg']['a'], r['valid']['recall@20'], r['test']['recall@20'], r['test']['ndcg@20']), flush=True)
+        return r
+
     if not (args.grid or args.summary):
+        if args.mode == 'SF':
+            run_sf()
+            return
         cfg = {'lr': args.lr, 'lam_D': args.lam_D}
         if args.mode in ('B3', 'B3d'):
             cfg['lam_J'] = args.lam_J
@@ -278,6 +402,9 @@ def main():
     if args.grid:
         fix = dict(kv.split('=', 1) for kv in args.fix.split())
         for mode in args.modes.replace(',', ' ').split():
+            if mode == 'SF':
+                run_sf()
+                continue
             grid = {k: ([float(fix[k])] if k in fix else v) for k, v in GRID[mode].items()}
             keys = sorted(grid)
             res = [run(mode, dict(zip(keys, v)), seeds[0]) for v in itertools.product(*[grid[k] for k in keys])]
@@ -317,7 +444,14 @@ def write_summary(out, b0, seeds):
             mode, cfg_tag(cfg), n_grid, ','.join(str(r['seed']) for r in finals),
             ','.join(str(r['best_epoch']) for r in finals), va, tr.mean(), tr.std(), tn.mean(), tn.std(),
             100 * (tr.mean() / b0['test']['recall@20'] - 1)))
-    lines.append('\nbest epoch 0 means the selected model is B0 itself (no useful correction found on valid).')
+    sf_path = os.path.join(out, 'SF.json')
+    if os.path.isfile(sf_path):
+        r = json.load(open(sf_path))
+        lines.append('| SF | a={:g} (text weight, z-scored scores) | {} | - | - | {:.4f} | {:.4f} | {:.4f} | {:+.2f}% |'.format(
+            r['cfg']['a'], len(r['curve']), r['valid']['recall@20'], r['test']['recall@20'], r['test']['ndcg@20'],
+            100 * (r['test']['recall@20'] / b0['test']['recall@20'] - 1)))
+    lines.append('\nCorrections (B2, B3, B2d, B3d, IDcorr): best epoch 0 = B0 itself (no useful correction on valid). '
+                 'CAT / GATE start from a random fusion; SF has no training.')
     text = '\n'.join(lines) + '\n'
     open(os.path.join(out, 'summary.md'), 'w').write(text)
     print(text)
