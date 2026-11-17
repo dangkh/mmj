@@ -1,0 +1,9 @@
+embedding_size: 64
+is_multimodal_model: True
+item_input: id          # id | text | visual | tv
+proj_hidden: 256
+proj_layers: 2
+feat_dropout: 0.0
+n_layers: [1, 2, 3]
+reg_weight: [1e-02, 1e-03, 1e-04, 1e-05]
+hyper_parameters: ["n_layers", "reg_weight"]

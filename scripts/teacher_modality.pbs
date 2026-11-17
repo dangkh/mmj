@@ -1,0 +1,46 @@
+#!/bin/bash
+#PBS -N teacher_mod
+#PBS -q small_gpuq
+#PBS -l select=1:ncpus=8:ngpus=1:mem=16gb
+#PBS -l walltime=48:00:00
+#PBS -j oe
+#
+# Teacher study: LightGCNC with the layer-0 item embedding from ID, text, visual or text+visual
+# (src/models/lightgcnc.py). For each source, sequentially:
+#   <src>_grid     n_layers {1,2,3} x reg_weight {1e-2..1e-5}, seed 999      (with graph propagation)
+#   <src>_l0       n_layers = 0  x reg_weight {1e-2..1e-5}, seed 999          (no propagation: u . E(x_i))
+#   <src>_grid_s3, <src>_l0_s3    the selected setting with seeds 1 and 2
+# Finished steps (a log with a BEST block) are skipped, so resubmitting continues where it stopped.
+#
+#   qsub -v DS=baby scripts/teacher_modality.pbs
+#   qsub -v DS=ml1m,SOURCES="text visual" scripts/teacher_modality.pbs
+# Summary: python tools/summarize_teacher.py baby ml1m dbbook
+
+cd "$PBS_O_WORKDIR" || exit 1
+source "$HOME/miniconda3/etc/profile.d/conda.sh"
+conda activate "${CONDA_ENV:-Astar}"
+[ -n "${DS:-}" ] || { echo "DS not set (qsub -v DS=baby ...)"; exit 1; }
+SOURCES="${SOURCES:-id text visual tv}"
+echo "Job $PBS_JOBID on $(hostname), dataset $DS, sources: $SOURCES, $(date '+%F %T')"
+nvidia-smi
+
+done_run() { python tools/best_params.py LightGCNC "$DS" "$1" > /dev/null 2>&1; }
+
+run() {   # run EXP_NAME ARGS...
+    local NAME=$1; shift
+    if done_run "$NAME"; then echo "[skip] $NAME finished"; return 0; fi
+    echo "===== [$(date '+%F %T')] $NAME: $* ====="
+    (cd src && python -u main.py -m LightGCNC -d "$DS" --exp_name="$NAME" "$@")
+}
+
+for SRC in $SOURCES; do
+    run "${SRC}_grid" --item_input="$SRC" --seed=999
+    run "${SRC}_l0" --item_input="$SRC" --n_layers=0 --seed=999
+    for V in grid l0; do
+        P=$(python tools/best_params.py LightGCNC "$DS" "${SRC}_${V}") || { echo "no result for ${SRC}_${V}"; continue; }
+        # shellcheck disable=SC2086
+        run "${SRC}_${V}_s3" --item_input="$SRC" $P --seed="[1,2]"
+    done
+done
+python tools/summarize_teacher.py "$DS"
+echo "Done $(date '+%F %T')"

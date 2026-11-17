@@ -103,6 +103,7 @@ ADAPTERS = {
     'LATTICE': _lattice,
     'MGCN': _mgcn,
     'LIGHTGCN': _lightgcn,
+    'LIGHTGCNC': _lightgcn,  # LightGCN with content item embeddings (src/models/lightgcnc.py)
 }
 
 
