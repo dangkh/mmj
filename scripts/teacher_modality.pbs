@@ -5,23 +5,36 @@
 #PBS -l walltime=48:00:00
 #PBS -j oe
 #
-# Teacher study: LightGCNC with the layer-0 item embedding from ID, text, visual or text+visual
-# (src/models/lightgcnc.py). For each source, sequentially:
+# Teacher study: LightGCNC with the layer-0 item embedding from ID, text, visual or text+visual, and the
+# two-channel ID + content model of DRAGON (src/models/lightgcnc.py). Source tokens:
+#   id text visual tv            single channel (64-d)
+#   id128                        ID only with 128-d embeddings (capacity of the two-channel models)
+#   idtext idvisual idtv         ID + content: item [i_id; E(x)], user [a_u u_id; (1-a_u) u_c] (softmax a_u)
+#   idtext:free idtext:none      same with DRAGON's free user weights / without weights (plain concat)
+#   <token>@text|visual|tv       add the DRAGON item-item kNN graph built from that feature, applied to the
+#                                (fused) item representation after propagation: i <- i + A i
+#                                e.g. idtext@tv (DRAGON-like), idtext@text, id@text (graph only, ID items)
+# Experiment names: ':' -> '_', '@' -> '_g'   (idtext:none@tv -> idtext_none_gtv)
+# For each source, sequentially:
 #   <src>_grid     n_layers {1,2,3} x reg_weight {1e-2..1e-5}, seed 999      (with graph propagation)
-#   <src>_l0       n_layers = 0  x reg_weight {1e-2..1e-5}, seed 999          (no propagation: u . E(x_i))
+#   <src>_l0       n_layers = 0  x reg_weight {1e-2..1e-5}, seed 999          (no propagation)
 #   <src>_grid_s3, <src>_l0_s3    the selected setting with seeds 1 and 2
+# VARIANTS="grid" runs only the graph variant (default "grid l0").
 # Finished steps (a log with a BEST block) are skipped, so resubmitting continues where it stopped.
 #
 #   qsub -v DS=baby scripts/teacher_modality.pbs
 #   qsub -v DS=ml1m,SOURCES="text visual" scripts/teacher_modality.pbs
+#   qsub -v DS=baby,SOURCES="idtext id128 idtext:none" scripts/teacher_modality.pbs
+#   qsub -v DS=baby,SOURCES="idtext@tv idtext@text id@text id128@text" scripts/teacher_modality.pbs
 # Summary: python tools/summarize_teacher.py baby ml1m dbbook
 
 cd "$PBS_O_WORKDIR" || exit 1
 source "$HOME/miniconda3/etc/profile.d/conda.sh"
 conda activate "${CONDA_ENV:-Astar}"
 [ -n "${DS:-}" ] || { echo "DS not set (qsub -v DS=baby ...)"; exit 1; }
-SOURCES="${SOURCES:-id text visual tv}"
-echo "Job $PBS_JOBID on $(hostname), dataset $DS, sources: $SOURCES, $(date '+%F %T')"
+SOURCES="${SOURCES:-id text visual tv idtext id128}"
+VARIANTS="${VARIANTS:-grid l0}"
+echo "Job $PBS_JOBID on $(hostname), dataset $DS, sources: $SOURCES, variants: $VARIANTS, $(date '+%F %T')"
 nvidia-smi
 
 done_run() { python tools/best_params.py LightGCNC "$DS" "$1" > /dev/null 2>&1; }
@@ -33,13 +46,39 @@ run() {   # run EXP_NAME ARGS...
     (cd src && python -u main.py -m LightGCNC -d "$DS" --exp_name="$NAME" "$@")
 }
 
+src_args() {   # token[:user_weight][@item_graph] -> LightGCNC arguments
+    local BASE=${1%%@*} G=${1#*@} TOK UW A
+    [ "$G" = "$1" ] && G=""
+    TOK=${BASE%%:*}; UW=${BASE#*:}
+    [ "$UW" = "$BASE" ] && UW=""
+    case "$TOK" in
+        id|text|visual|tv) A="--item_input=$TOK" ;;
+        id128) A="--item_input=id --embedding_size=128" ;;
+        idtext|idvisual|idtv) A="--item_input=id+${TOK#id}${UW:+ --user_weight=$UW}" ;;
+        *) echo "unknown source $1" >&2; return 1 ;;
+    esac
+    case "$G" in
+        "") ;;
+        text|visual|tv) A="$A --item_graph=$G" ;;
+        *) echo "unknown item graph $G in $1" >&2; return 1 ;;
+    esac
+    echo "$A"
+}
+
 for SRC in $SOURCES; do
-    run "${SRC}_grid" --item_input="$SRC" --seed=999
-    run "${SRC}_l0" --item_input="$SRC" --n_layers=0 --seed=999
-    for V in grid l0; do
-        P=$(python tools/best_params.py LightGCNC "$DS" "${SRC}_${V}") || { echo "no result for ${SRC}_${V}"; continue; }
+    A=$(src_args "$SRC") || continue
+    N=${SRC/:/_}; N=${N/@/_g}
+    for V in $VARIANTS; do
         # shellcheck disable=SC2086
-        run "${SRC}_${V}_s3" --item_input="$SRC" $P --seed="[1,2]"
+        case "$V" in
+            grid) run "${N}_grid" $A --seed=999 ;;
+            l0)   run "${N}_l0" $A --n_layers=0 --seed=999 ;;
+        esac
+    done
+    for V in $VARIANTS; do
+        P=$(python tools/best_params.py LightGCNC "$DS" "${N}_${V}") || { echo "no result for ${N}_${V}"; continue; }
+        # shellcheck disable=SC2086
+        run "${N}_${V}_s3" $A $P --seed="[1,2]"
     done
 done
 python tools/summarize_teacher.py "$DS"

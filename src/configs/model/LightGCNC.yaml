@@ -7,3 +7,8 @@ feat_dropout: 0.0
 n_layers: [1, 2, 3]
 reg_weight: [1e-02, 1e-03, 1e-04, 1e-05]
 hyper_parameters: ["n_layers", "reg_weight"]
+user_weight: softmax    # two-channel only: softmax | free | none
+item_graph: none        # none | text | visual | tv  (DRAGON-style item-item kNN graph)
+knn_k: 10
+n_mm_layers: 1
+mm_image_weight: 0.1

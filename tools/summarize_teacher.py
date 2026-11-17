@@ -20,8 +20,13 @@ import pandas as pd
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOG_DIR = os.path.join(ROOT, 'src', 'log')
-SOURCES = ('id', 'text', 'visual', 'tv')
-LABEL = {'id': 'ID only', 'text': 'Text only', 'visual': 'Visual only', 'tv': 'Text + Visual'}
+BASE_SOURCES = ('id', 'id128', 'text', 'visual', 'tv', 'idtext', 'idtext_free', 'idtext_none', 'idvisual', 'idtv')
+SOURCES = tuple(b + g for b in BASE_SOURCES for g in ('', '_gtext', '_gvisual', '_gtv'))
+GRAPH_LABEL = {'': '', '_gtext': ' + item graph (text)', '_gvisual': ' + item graph (visual)', '_gtv': ' + item graph (tv)'}
+LABEL = {'id': 'ID only', 'id128': 'ID only (128-d)', 'text': 'Text only', 'visual': 'Visual only',
+         'tv': 'Text + Visual', 'idtext': 'ID + Text (a_u)', 'idtext_free': 'ID + Text (DRAGON free w)',
+         'idtext_none': 'ID + Text (no weights)', 'idvisual': 'ID + Visual (a_u)', 'idtv': 'ID + Text + Visual (a_u)'}
+ALPHA = re.compile(r'user weight of the ID channel a_u: mean ([0-9.]+), sd ([0-9.]+)')
 METRICS = ('recall@20', 'ndcg@20', 'recall@10', 'ndcg@10')
 
 BLOCK = re.compile(r'Parameters:\s*(\[.*?\])=(\(.*?\)),\s*best valid:(.*?),\s*best test:(.*?)(?:\n|$)', re.S)
@@ -77,7 +82,10 @@ def summarize(ds):
             s3 = latest_log(ds, '{}_{}_s3'.format(src, var))
             if s3 is not None:
                 tests += [t for _, _, t in all_runs(s3)]
-            row = {'dataset': ds, 'source': LABEL[src], 'variant': vlabel,
+            alphas = ALPHA.findall(g)
+            base, g_suf = (src.split('_g')[0], '_g' + src.split('_g')[1]) if '_g' in src else (src, '')
+            row = {'dataset': ds, 'source': LABEL[base] + GRAPH_LABEL[g_suf], 'variant': vlabel,
+                   'a_u (last epoch logged)': '{} ± {}'.format(*alphas[-1]) if alphas else '-',
                    'setting': ' '.join('{}={}'.format(k, v) for k, v in params.items() if k != 'seed'),
                    'seeds': len(tests), 'valid R@20': va.get('recall@20', np.nan)}
             for m in METRICS:
@@ -102,15 +110,15 @@ def main():
              'Test metrics: mean +- std over seeds; setting selected on valid Recall@20 (seed 999).\n']
     for ds, g in df.groupby('dataset', sort=False):
         lines.append('\n## {}\n'.format(ds))
-        lines.append('| source | variant | setting | seeds | valid R@20 | test R@20 | test N@20 | test R@10 | test N@10 |')
-        lines.append('|---|---|---|---|---|---|---|---|---|')
+        lines.append('| source | variant | setting | seeds | valid R@20 | test R@20 | test N@20 | test R@10 | test N@10 | a_u (ID) |')
+        lines.append('|---|---|---|---|---|---|---|---|---|---|')
         for _, r in g.iterrows():
             def cell(m):
                 mu, sd = r['test ' + m], r['sd ' + m]
                 return '{:.4f} ± {:.4f}'.format(mu, sd) if np.isfinite(sd) else '{:.4f}'.format(mu)
-            lines.append('| {} | {} | {} | {} | {:.4f} | {} | {} | {} | {} |'.format(
+            lines.append('| {} | {} | {} | {} | {:.4f} | {} | {} | {} | {} | {} |'.format(
                 r['source'], r['variant'], r['setting'], r['seeds'], r['valid R@20'], cell('recall@20'),
-                cell('ndcg@20'), cell('recall@10'), cell('ndcg@10')))
+                cell('ndcg@20'), cell('recall@10'), cell('ndcg@10'), r['a_u (last epoch logged)']))
     text = '\n'.join(lines) + '\n'
     with open(os.path.join(out_dir, 'teacher_modality.md'), 'w') as f:
         f.write(text)
