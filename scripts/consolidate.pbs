@@ -5,34 +5,53 @@
 #PBS -l walltime=24:00:00
 #PBS -j oe
 #
-# Text -> ID consolidation (B0-B3) for one dataset (tools/consolidate.py):
-#   1. frozen teachers: LightGCNC item_input=id and item_input=text, best setting of the teacher study
-#      (logs <src>_grid), seed 999, with --save_taps=True  -> taps/LightGCNC-<ds>-teacher_{id,text}
-#   2. grid on valid for B2 and B3 with the first seed of SEEDS, then the remaining seeds of SEEDS for the
-#      selected setting; summary.md. SEEDS defaults to "999" (one seed, check run); later: SEEDS="999 1 2"
-# Finished steps are skipped.
+# Text -> ID consolidation (tools/consolidate.py), one step per job (scripts/submit_consolidate.sh submits
+# them with dependencies). Steps (STEP):
+#   teacher   SRC=id|text: LightGCNC with the best setting of the teacher study (log <SRC>_grid), seed 999,
+#             --save_taps=True -> taps/LightGCNC-<DS>-teacher_<SRC>
+#   grid      MODES="B2" | "B3", optional LAMJ=0.1|1 (only that lam_J of B3): grid on valid with the first
+#             seed of SEEDS (default 999); no extra seeds
+#   finals    best setting per mode over ALL finished grid runs, run for every seed of SEEDS, then summary
+#   summary   table only (results/consolidate/<DS>/summary.md)
+# Finished runs are skipped everywhere.
 #
-#   qsub -v DS=dbbook scripts/consolidate.pbs
-#   qsub -v DS=baby scripts/consolidate.pbs
-#   qsub -v DS=dbbook,SEEDS="999 1 2" scripts/consolidate.pbs     # add seeds 1, 2 later (finished runs reused)
+#   qsub -v DS=dbbook,STEP=teacher,SRC=id scripts/consolidate.pbs
+#   qsub -v DS=dbbook,STEP=grid,MODES=B3,LAMJ=1 scripts/consolidate.pbs
+#   qsub -v DS=dbbook,STEP=finals,SEEDS="999 1 2" scripts/consolidate.pbs
 
 cd "$PBS_O_WORKDIR" || exit 1
 source "$HOME/miniconda3/etc/profile.d/conda.sh"
 conda activate "${CONDA_ENV:-Astar}"
-[ -n "${DS:-}" ] || { echo "DS not set (qsub -v DS=dbbook ...)"; exit 1; }
-echo "Job $PBS_JOBID on $(hostname), dataset $DS, $(date '+%F %T')"
+[ -n "${DS:-}" ] || { echo "DS not set"; exit 1; }
+STEP="${STEP:-grid}"
+SEEDS="${SEEDS:-999}"
+echo "Job $PBS_JOBID on $(hostname), dataset $DS, step $STEP ${SRC:-} ${MODES:-} ${LAMJ:+lam_J=$LAMJ}, seeds $SEEDS, $(date '+%F %T')"
 nvidia-smi
 
-for SRC in id text; do
-    TAPS="taps/LightGCNC-${DS}-teacher_${SRC}"
-    if [ -f "$TAPS/T3.npy" ] && [ -f "$TAPS/T3_user.npy" ]; then echo "[skip] $TAPS exists"; continue; fi
-    P=$(python tools/best_params.py LightGCNC "$DS" "${SRC}_grid") || { echo "no finished ${SRC}_grid log for $DS"; exit 1; }
-    echo "===== teacher $SRC: $P ====="
-    # shellcheck disable=SC2086
-    (cd src && python -u main.py -m LightGCNC -d "$DS" --item_input="$SRC" $P --seed=999 \
-        --save_taps=True --exp_name="teacher_${SRC}") || exit 1
-done
+TAPS_ID="taps/LightGCNC-${DS}-teacher_id"
+TAPS_T="taps/LightGCNC-${DS}-teacher_text"
+CONS=(python -u tools/consolidate.py -d "$DS" --id_taps "$TAPS_ID" --text_taps "$TAPS_T" --seeds "$SEEDS")
 
-python -u tools/consolidate.py -d "$DS" --grid --seeds "${SEEDS:-999}" \
-    --id_taps "taps/LightGCNC-${DS}-teacher_id" --text_taps "taps/LightGCNC-${DS}-teacher_text"
+case "$STEP" in
+    teacher)
+        [ -n "${SRC:-}" ] || { echo "SRC not set (id|text)"; exit 1; }
+        TAPS="taps/LightGCNC-${DS}-teacher_${SRC}"
+        if [ -f "$TAPS/T3.npy" ] && [ -f "$TAPS/T3_user.npy" ]; then echo "[skip] $TAPS exists"; exit 0; fi
+        P=$(python tools/best_params.py LightGCNC "$DS" "${SRC}_grid") || { echo "no finished ${SRC}_grid log for $DS"; exit 1; }
+        echo "===== teacher $SRC: $P ====="
+        # shellcheck disable=SC2086
+        (cd src && python -u main.py -m LightGCNC -d "$DS" --item_input="$SRC" $P --seed=999 \
+            --save_taps=True --exp_name="teacher_${SRC}") || exit 1
+        ;;
+    grid)
+        "${CONS[@]}" --grid --no_finals --modes "${MODES:-B2 B3}" ${LAMJ:+--fix "lam_J=$LAMJ"} || exit 1
+        ;;
+    finals)
+        "${CONS[@]}" --grid --modes "${MODES:-B2 B3}" || exit 1
+        ;;
+    summary)
+        "${CONS[@]}" --summary || exit 1
+        ;;
+    *) echo "unknown STEP $STEP"; exit 1 ;;
+esac
 echo "Done $(date '+%F %T')"

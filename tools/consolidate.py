@@ -193,6 +193,10 @@ def main():
     ap.add_argument('--out_dir', default=os.path.join(ROOT, 'results', 'consolidate'))
     ap.add_argument('--mode', choices=['B2', 'B3'], default='B3')
     ap.add_argument('--grid', action='store_true', help='grid on valid for B2 and B3 with the first of --seeds, then the other seeds for the best setting')
+    ap.add_argument('--modes', default='B2 B3', help='modes of the grid, e.g. "B2" or "B3" (separate jobs)')
+    ap.add_argument('--fix', default='', help='restrict the grid, e.g. "lam_J=0.1" or "lam_J=1 lr=0.001"')
+    ap.add_argument('--no_finals', action='store_true', help='grid only (seed = first of --seeds); no other seeds')
+    ap.add_argument('--summary', action='store_true', help='no training: table from the finished runs in out_dir')
     ap.add_argument('--lam_J', type=float, default=1.0)
     ap.add_argument('--lam_D', type=float, default=1e-2)
     ap.add_argument('--lr', type=float, default=1e-3)
@@ -229,7 +233,9 @@ def main():
         R_trva.data[:] = 1.0
         b0 = {'mode': 'B0', 'valid': rank_eval(tmp, R_tr, R_va, R_tr, device, delta=False),
               'test': rank_eval(tmp, R_tr, R_te, R_trva, device, delta=False)}
-        json.dump(b0, open(b0_path, 'w'), indent=1)
+        tmp_path = '{}.{}.tmp'.format(b0_path, os.getpid())
+        json.dump(b0, open(tmp_path, 'w'), indent=1)
+        os.replace(tmp_path, b0_path)
     b0 = json.load(open(b0_path))
     print('[B0] valid R@20 {:.4f} | test R@20 {:.4f} N@20 {:.4f}'.format(
         b0['valid']['recall@20'], b0['test']['recall@20'], b0['test']['ndcg@20']), flush=True)
@@ -242,13 +248,15 @@ def main():
         t0 = time.time()
         r = train(args, mats, teachers, mode, cfg, seed, device)
         r['seconds'] = time.time() - t0
-        json.dump(r, open(f, 'w'), indent=1)
+        tmp_path = '{}.{}.tmp'.format(f, os.getpid())
+        json.dump(r, open(tmp_path, 'w'), indent=1)
+        os.replace(tmp_path, f)
         print('[{}] {} seed {}: best epoch {} valid R@20 {:.4f} | test R@20 {:.4f} N@20 {:.4f}'.format(
             mode, cfg, seed, r['best_epoch'], r['valid']['recall@20'], r['test']['recall@20'],
             r['test']['ndcg@20']), flush=True)
         return r
 
-    if not args.grid:
+    if not (args.grid or args.summary):
         cfg = {'lr': args.lr, 'lam_D': args.lam_D}
         if args.mode == 'B3':
             cfg['lam_J'] = args.lam_J
@@ -256,26 +264,48 @@ def main():
         return
 
     seeds = [int(x) for x in args.seeds.replace(',', ' ').split()]
+    if args.grid:
+        fix = dict(kv.split('=', 1) for kv in args.fix.split())
+        for mode in args.modes.replace(',', ' ').split():
+            grid = {k: ([float(fix[k])] if k in fix else v) for k, v in GRID[mode].items()}
+            keys = sorted(grid)
+            res = [run(mode, dict(zip(keys, v)), seeds[0]) for v in itertools.product(*[grid[k] for k in keys])]
+            if not args.no_finals:
+                top = max(res, key=lambda r: r['valid']['recall@20'])
+                for sd in seeds:
+                    run(mode, top['cfg'], sd)
+    write_summary(out, b0, seeds)
+
+
+def write_summary(out, b0, seeds):
+    """Best setting per mode on valid (first seed) over ALL finished grid runs in out, plus its other seeds."""
     rows = []
     for mode in ('B2', 'B3'):
-        keys = sorted(GRID[mode])
-        res = [run(mode, dict(zip(keys, v)), seeds[0]) for v in itertools.product(*[GRID[mode][k] for k in keys])]
-        top = max(res, key=lambda r: r['valid']['recall@20'])
-        finals = [run(mode, top['cfg'], s) for s in seeds]
-        rows.append((mode, top['cfg'], finals))
-    lines = ['# Text -> ID consolidation: {}\n'.format(args.dataset),
-             'B0 = frozen ID teacher. Test metrics: mean +- std over correction seeds {} (teachers fixed).\n'.format(seeds),
-             '| config | setting | best epochs | valid R@20 | test R@20 | test N@20 | vs B0 (R@20) |',
-             '|---|---|---|---|---|---|---|',
-             '| B0 ID only | - | - | {:.4f} | {:.4f} | {:.4f} | - |'.format(
+        runs = []
+        for f in sorted(os.listdir(out)):
+            if f.startswith(mode + '_') and f.endswith('.json'):
+                runs.append(json.load(open(os.path.join(out, f))))
+        grid = [r for r in runs if r['seed'] == seeds[0]]
+        if not grid:
+            continue
+        top = max(grid, key=lambda r: r['valid']['recall@20'])
+        finals = [r for r in runs if r['cfg'] == top['cfg'] and r['seed'] in seeds]
+        rows.append((mode, top['cfg'], finals, len(grid)))
+    lines = ['# Text -> ID consolidation: {}\n'.format(os.path.basename(out)),
+             'B0 = frozen ID teacher. Setting chosen on valid R@20 with seed {}; test = mean +- std over the '
+             'finished seeds of that setting (teachers fixed).\n'.format(seeds[0]),
+             '| config | setting | grid runs | seeds | best epochs | valid R@20 | test R@20 | test N@20 | vs B0 (R@20) |',
+             '|---|---|---|---|---|---|---|---|---|',
+             '| B0 ID only | - | - | - | - | {:.4f} | {:.4f} | {:.4f} | - |'.format(
                  b0['valid']['recall@20'], b0['test']['recall@20'], b0['test']['ndcg@20'])]
-    for mode, cfg, finals in rows:
+    for mode, cfg, finals, n_grid in rows:
         tr = np.array([r['test']['recall@20'] for r in finals])
         tn = np.array([r['test']['ndcg@20'] for r in finals])
         va = np.mean([r['valid']['recall@20'] for r in finals])
-        lines.append('| {} | {} | {} | {:.4f} | {:.4f} ± {:.4f} | {:.4f} ± {:.4f} | {:+.2f}% |'.format(
-            mode, cfg_tag(cfg), ','.join(str(r['best_epoch']) for r in finals), va, tr.mean(), tr.std(),
-            tn.mean(), tn.std(), 100 * (tr.mean() / b0['test']['recall@20'] - 1)))
+        lines.append('| {} | {} | {} | {} | {} | {:.4f} | {:.4f} ± {:.4f} | {:.4f} ± {:.4f} | {:+.2f}% |'.format(
+            mode, cfg_tag(cfg), n_grid, ','.join(str(r['seed']) for r in finals),
+            ','.join(str(r['best_epoch']) for r in finals), va, tr.mean(), tr.std(), tn.mean(), tn.std(),
+            100 * (tr.mean() / b0['test']['recall@20'] - 1)))
     lines.append('\nbest epoch 0 means the selected model is B0 itself (no useful correction found on valid).')
     text = '\n'.join(lines) + '\n'
     open(os.path.join(out, 'summary.md'), 'w').write(text)
