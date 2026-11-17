@@ -7,6 +7,7 @@
 #   bash scripts/submit_consolidate.sh dbbook
 #   QUEUE=med_gpuq bash scripts/submit_consolidate.sh baby
 #   DRY_RUN=1 bash scripts/submit_consolidate.sh dbbook
+#   JOBS="IDcorr B2d" bash scripts/submit_consolidate.sh dbbook     # controls only (finished runs are skipped)
 # Afterwards (summary only, a few seconds):  qsub -v DS=dbbook,STEP=summary scripts/consolidate.pbs
 #   or directly: python tools/consolidate.py -d dbbook --summary --id_taps taps/LightGCNC-dbbook-teacher_id \
 #                    --text_taps taps/LightGCNC-dbbook-teacher_text
@@ -15,6 +16,7 @@ set -eu
 cd "$(dirname "$0")/.."
 QUEUE="${QUEUE:-small_gpuq}"
 SEEDS="${SEEDS:-999}"
+JOBS="${JOBS:-B2 B3}"     # grids to submit: any of B2 B3 B2d B3d IDcorr (B3, B3d: one job per lam_J)
 mkdir -p results/consolidate/logs
 
 sub() {   # sub NAME DEPEND VARS -> prints the job id
@@ -36,8 +38,14 @@ for DS in "$@"; do
         fi
     done
     DEP=$(IFS=:; echo "${DEPS[*]:-}")
-    sub "ct_${DS}_B2" "$DEP" "DS=$DS,STEP=grid,MODES=B2,SEEDS=$SEEDS" > /dev/null
-    sub "ct_${DS}_B3a" "$DEP" "DS=$DS,STEP=grid,MODES=B3,LAMJ=0.1,SEEDS=$SEEDS" > /dev/null
-    sub "ct_${DS}_B3b" "$DEP" "DS=$DS,STEP=grid,MODES=B3,LAMJ=1,SEEDS=$SEEDS" > /dev/null
+    for J in $JOBS; do
+        case "$J" in
+            B2|B2d|IDcorr) sub "ct_${DS}_${J}" "$DEP" "DS=$DS,STEP=grid,MODES=$J,SEEDS=$SEEDS" > /dev/null ;;
+            B3|B3d)
+                sub "ct_${DS}_${J}a" "$DEP" "DS=$DS,STEP=grid,MODES=$J,LAMJ=0.1,SEEDS=$SEEDS" > /dev/null
+                sub "ct_${DS}_${J}b" "$DEP" "DS=$DS,STEP=grid,MODES=$J,LAMJ=1,SEEDS=$SEEDS" > /dev/null ;;
+            *) echo "unknown job $J" >&2 ;;
+        esac
+    done
 done
 qstat -u "${USER:-$(whoami)}" 2>/dev/null || true

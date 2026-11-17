@@ -13,7 +13,11 @@ Both are frozen. Only the correction Delta_T is trained, with BPR on the train i
     B2      Z_i = C([S_T ; Y_id[i]])                       conditional correction, no JEPA (lam_J = 0)
     B3      Z_i = C([S_T - sg(S_hat) ; Y_id[i]])           correction on the text part the ID context
                                                            does not predict;  L_J = ||S_hat - sg(S_T)||^2
-    g_u     = G([U_id[u] ; U_t[u]])                        user side, no free user table
+    B2d,B3d difference form: Z_i = C([x ; Y_id[i]]) - C([0 ; Y_id[i]])  (x as in B2 / B3), so the item side
+            of the correction is 0 whenever the text input is 0: no ID-only residual inside C
+    IDcorr  control without any text: the same modules on ID inputs only,
+            S = E_T(Y_id[i]), Z_i = C([S ; Y_id[i]]), g_u = G([U_id[u] ; U_id[u]])  (same parameter count)
+    g_u     = G([U_id[u] ; U_t[u]])                        user side, no free user table (IDcorr: U_id twice)
     L = BPR(s) + lam_J L_J + lam_D E[Delta_T^2]
 
 B2 and B3 have the same modules and parameter count (P exists in B2 but receives no gradient). The last
@@ -48,6 +52,8 @@ from probe_knn import evaluate          # noqa: E402
 
 GRID = {'B2': {'lam_D': [0.0, 1e-3, 1e-2, 1e-1], 'lr': [1e-3, 1e-4]},
         'B3': {'lam_D': [0.0, 1e-3, 1e-2, 1e-1], 'lr': [1e-3, 1e-4], 'lam_J': [0.1, 1.0]}}
+GRID['B2d'], GRID['B3d'], GRID['IDcorr'] = GRID['B2'], GRID['B3'], GRID['B2']
+MODES = ('B2', 'B3', 'B2d', 'B3d', 'IDcorr')
 
 
 def mlp(d_in, d_hid, d_out):
@@ -70,13 +76,18 @@ class Consolidator(nn.Module):
     def item_side(self, items=None):
         y_t = self.Y_t if items is None else self.Y_t[items]
         y_id = self.Y_id if items is None else self.Y_id[items]
-        s_t = self.E_T(y_t)
+        s_t = self.E_T(y_id if self.mode == 'IDcorr' else y_t)
         s_hat = self.P(y_id)
-        x = s_t - s_hat.detach() if self.mode == 'B3' else s_t
-        return self.C(torch.cat([x, y_id], 1)), s_t, s_hat
+        x = s_t - s_hat.detach() if self.mode in ('B3', 'B3d') else s_t
+        z = self.C(torch.cat([x, y_id], 1))
+        if self.mode in ('B2d', 'B3d'):
+            z = z - self.C(torch.cat([torch.zeros_like(x), y_id], 1))
+        return z, s_t, s_hat
 
     def user_side(self, users=None):
         u_id = self.U_id if users is None else self.U_id[users]
+        if self.mode == 'IDcorr':
+            return self.G(torch.cat([u_id, u_id], 1))
         u_t = self.U_t if users is None else self.U_t[users]
         return self.G(torch.cat([u_id, u_t], 1))
 
@@ -151,7 +162,7 @@ def train(args, mats, teachers, mode, cfg, seed, device, log=print):
             sn, dn = model.scores(ub, nb)
             bpr = -F.logsigmoid(sp - sn).mean()
             loss = bpr + cfg['lam_D'] * 0.5 * (dp.pow(2).mean() + dn.pow(2).mean())
-            if mode == 'B3' and cfg['lam_J'] > 0:
+            if mode in ('B3', 'B3d') and cfg['lam_J'] > 0:
                 items = torch.cat([pb, nb]).unique()
                 _, s_t, s_hat = model.item_side(items)
                 lj = F.mse_loss(s_hat, s_t.detach())
@@ -191,7 +202,7 @@ def main():
     ap.add_argument('--id_taps', required=True)
     ap.add_argument('--text_taps', required=True)
     ap.add_argument('--out_dir', default=os.path.join(ROOT, 'results', 'consolidate'))
-    ap.add_argument('--mode', choices=['B2', 'B3'], default='B3')
+    ap.add_argument('--mode', choices=list(MODES), default='B3')
     ap.add_argument('--grid', action='store_true', help='grid on valid for B2 and B3 with the first of --seeds, then the other seeds for the best setting')
     ap.add_argument('--modes', default='B2 B3', help='modes of the grid, e.g. "B2" or "B3" (separate jobs)')
     ap.add_argument('--fix', default='', help='restrict the grid, e.g. "lam_J=0.1" or "lam_J=1 lr=0.001"')
@@ -258,7 +269,7 @@ def main():
 
     if not (args.grid or args.summary):
         cfg = {'lr': args.lr, 'lam_D': args.lam_D}
-        if args.mode == 'B3':
+        if args.mode in ('B3', 'B3d'):
             cfg['lam_J'] = args.lam_J
         run(args.mode, cfg, args.seed)
         return
@@ -280,7 +291,7 @@ def main():
 def write_summary(out, b0, seeds):
     """Best setting per mode on valid (first seed) over ALL finished grid runs in out, plus its other seeds."""
     rows = []
-    for mode in ('B2', 'B3'):
+    for mode in MODES:
         runs = []
         for f in sorted(os.listdir(out)):
             if f.startswith(mode + '_') and f.endswith('.json'):
