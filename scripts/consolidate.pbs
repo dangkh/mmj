@@ -8,11 +8,13 @@
 # Text -> ID consolidation (B0-B3) for one dataset (tools/consolidate.py):
 #   1. frozen teachers: LightGCNC item_input=id and item_input=text, best setting of the teacher study
 #      (logs <src>_grid), seed 999, with --save_taps=True  -> taps/LightGCNC-<ds>-teacher_{id,text}
-#   2. grid on valid (seed 0) for B2 and B3, then seeds 0, 1, 2 of the selected setting; summary.md
+#   2. grid on valid for B2 and B3 with the first seed of SEEDS, then the remaining seeds of SEEDS for the
+#      selected setting; summary.md. SEEDS defaults to "999" (one seed, check run); later: SEEDS="999 1 2"
 # Finished steps are skipped.
 #
 #   qsub -v DS=dbbook scripts/consolidate.pbs
 #   qsub -v DS=baby scripts/consolidate.pbs
+#   qsub -v DS=dbbook,SEEDS="999 1 2" scripts/consolidate.pbs     # add seeds 1, 2 later (finished runs reused)
 
 cd "$PBS_O_WORKDIR" || exit 1
 source "$HOME/miniconda3/etc/profile.d/conda.sh"
@@ -31,6 +33,6 @@ for SRC in id text; do
         --save_taps=True --exp_name="teacher_${SRC}") || exit 1
 done
 
-python -u tools/consolidate.py -d "$DS" --grid \
+python -u tools/consolidate.py -d "$DS" --grid --seeds "${SEEDS:-999}" \
     --id_taps "taps/LightGCNC-${DS}-teacher_id" --text_taps "taps/LightGCNC-${DS}-teacher_text"
 echo "Done $(date '+%F %T')"
