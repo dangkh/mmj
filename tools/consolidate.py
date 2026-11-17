@@ -25,7 +25,7 @@ masks train + valid items. The checkpoint is chosen on valid Recall@20.
 
     python tools/consolidate.py -d dbbook --id_taps taps/LightGCNC-dbbook-teacher_id \
         --text_taps taps/LightGCNC-dbbook-teacher_text --mode B3 --lam_J 1 --lam_D 0.01 --seed 0
-    python tools/consolidate.py -d dbbook ... --grid     # grid on valid (seed 0) for B2 and B3, then seeds 0,1,2
+    python tools/consolidate.py -d dbbook ... --grid --seeds 999   # grid on valid for B2 and B3 (seed 999)
 Output: results/consolidate/<ds>/<mode>_<cfg>_s<seed>.json and summary.md
 """
 import argparse
@@ -192,12 +192,12 @@ def main():
     ap.add_argument('--text_taps', required=True)
     ap.add_argument('--out_dir', default=os.path.join(ROOT, 'results', 'consolidate'))
     ap.add_argument('--mode', choices=['B2', 'B3'], default='B3')
-    ap.add_argument('--grid', action='store_true', help='grid (seed 0) for B2 and B3, then seeds 0 1 2 of the best')
+    ap.add_argument('--grid', action='store_true', help='grid on valid for B2 and B3 with the first of --seeds, then the other seeds for the best setting')
     ap.add_argument('--lam_J', type=float, default=1.0)
     ap.add_argument('--lam_D', type=float, default=1e-2)
     ap.add_argument('--lr', type=float, default=1e-3)
-    ap.add_argument('--seed', type=int, default=0)
-    ap.add_argument('--seeds', default='0,1,2')
+    ap.add_argument('--seed', type=int, default=999)
+    ap.add_argument('--seeds', default='999', help='e.g. "999" or "999 1 2"; the first one is used for the grid')
     ap.add_argument('--d', type=int, default=64)
     ap.add_argument('--hidden', type=int, default=256)
     ap.add_argument('--batch', type=int, default=4096)
@@ -255,7 +255,7 @@ def main():
         run(args.mode, cfg, args.seed)
         return
 
-    seeds = [int(s) for s in args.seeds.split(',')]
+    seeds = [int(x) for x in args.seeds.replace(',', ' ').split()]
     rows = []
     for mode in ('B2', 'B3'):
         keys = sorted(GRID[mode])
