@@ -1,0 +1,27 @@
+#!/bin/bash
+#PBS -N contrib
+#PBS -q small_gpuq
+#PBS -l select=1:ncpus=8:ngpus=1:mem=16gb
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#
+# Frozen SF + zero-initialised correction (tools/contrib_correction.py), one dataset, one fit protocol:
+#   stage 1 out-of-fold residuals (R_B3, R_TO), A0 = SF, then A1 (TO), A2 (R_B3), A3 (R_TO), grid lr x lam_D.
+# Needs taps/LightGCNC-<DS>-teacher_id and taps/LightGCNC-<DS>-teacher_text_layers (scripts/text_graph_probe.pbs).
+# Finished runs are skipped. Run FIT=valid only after the FIT=train job of the same dataset has passed stage 1
+# (both use the same residual file), or submit it with -W depend=afterok:<jobid>.
+#
+#   qsub -v DS=baby scripts/contrib_correction.pbs
+#   qsub -v DS=baby,FIT=valid scripts/contrib_correction.pbs
+#   qsub -v DS=dbbook,SEEDS="999 1 2" scripts/contrib_correction.pbs      # other seeds for the selected settings
+
+cd "$PBS_O_WORKDIR" || exit 1
+source "$HOME/miniconda3/etc/profile.d/conda.sh"
+conda activate "${CONDA_ENV:-Astar}"
+[ -n "${DS:-}" ] || { echo "DS not set"; exit 1; }
+FIT=${FIT:-train}
+echo "Job $PBS_JOBID on $(hostname), dataset $DS, fit $FIT, configs ${CONFIGS:-A1 A2 A3}, seeds ${SEEDS:-999}, $(date '+%F %T')"
+
+python -u tools/contrib_correction.py -d "$DS" --fit "$FIT" --configs "${CONFIGS:-A1 A2 A3}" \
+    --seeds "${SEEDS:-999}" --pred_head "${PRED_HEAD:-mlp2}"
+echo "Done $(date '+%F %T')"
