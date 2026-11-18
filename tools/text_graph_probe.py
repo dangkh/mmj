@@ -15,6 +15,10 @@ mlp1, mlp2; regularisation chosen on val items):
     Jg   T^G of a teacher whose layer 0 is one shared vector for all items (item_input=const): graph and
          user embeddings only, no item content. Control for J2.
     L<l> T^(l) of the Text teacher at each layer l >= 1 (L0 = J1)
+Source of L2 (same graph, only the layer-0 item vectors change; A_hat = LightGCN-normalised train graph, the item
+rows of A_hat^2 x depend on the item block of x only, so L2 = A_hat^2 T^(0) exactly):
+    L2perm<s>  A_hat^2 T^(0)[pi_s]: text vectors shuffled across items (s = 0, 1, 2); L2perm = mean over s
+    L2const    A_hat^2 (1 c^T), c = mean_i T^(0)_i: rank 1, graph structure only (a degree-like scalar per item)
 Protocol: the item split of E-A (data/<ds>/jepay_item_split.npz, 80/10/10, stratified by degree): probes are
 fitted on train items, selected on val items, reported on eval items.
 Metrics (eval items): MSE and R^2 to Y; ranking of eval items by U_id . Y_hat (Recall/NDCG@20; ceiling:
@@ -32,6 +36,7 @@ import sys
 import time
 
 import numpy as np
+import scipy.sparse as sp
 import torch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -42,7 +47,19 @@ from jepay.metrics import per_item_mse, r2, recall_eval_items, paired_bootstrap 
 
 HEADS = ('lin', 'mlp1', 'mlp2')
 PAIRS = [('J2', 'J1', 'graph on text'), ('J3', 'J2', 'raw + graph vs graph'), ('J2', 'Jg', 'text adds to graph'),
-         ('JD', 'J1', 'graph change vs text'), ('J1', 'J0', 'learned E_T vs raw text'), ('J3', 'J1', 'raw + graph vs raw')]
+         ('JD', 'J1', 'graph change vs text'), ('J1', 'J0', 'learned E_T vs raw text'), ('J3', 'J1', 'raw + graph vs raw'),
+         ('L2', 'L2perm', 'correct text-item match'), ('L2', 'L2const', 'text vs graph structure'),
+         ('L2perm', 'L2const', 'any text vs structure'), ('L2', 'J1', 'neighbour text vs own text')]
+N_PERM = 3
+
+
+def item_adj(R_tr):
+    """Item-side two-hop operator of the LightGCN graph: N = D_u^-1/2 R D_i^-1/2, A_hat^2 (items) = N^T N."""
+    R = R_tr.tocsr().astype(np.float64)
+    du = np.asarray(R.sum(1)).ravel() + 1e-7
+    di = np.asarray(R.sum(0)).ravel() + 1e-7
+    N = sp.diags(du ** -0.5) @ R @ sp.diags(di ** -0.5)
+    return lambda X: np.asarray(N.T @ (N @ X.astype(np.float64)), dtype=np.float32)
 
 
 def layers_of(path):
@@ -52,7 +69,7 @@ def layers_of(path):
     return [np.load(f).astype(np.float32) for f in files]
 
 
-def build_inputs(args):
+def build_inputs(args, R_tr):
     sets, info = {}, {}
     T = np.load(os.path.join(args.data_dir, args.dataset, 'text_feat.npy')).astype(np.float32)
     sets['J0'] = T
@@ -70,6 +87,18 @@ def build_inputs(args):
     for l in range(1, len(L)):
         sets['L{}'.format(l)] = L[l]
     info['text_layers'] = len(L) - 1
+    if len(L) > 2:
+        hop2 = item_adj(R_tr)
+        L2re = hop2(L[0])
+        gap = float(np.abs(L2re - L[2]).max() / max(np.abs(L[2]).max(), 1e-12))
+        info['L2_recomputed_relgap'] = gap
+        print('[probe] A_hat^2 T^(0) vs saved T_item_l2: max rel. gap {:.2e}'.format(gap), flush=True)
+        if gap > 1e-3:
+            print('[probe] WARNING: recomputed L2 differs from the teacher (graph mismatch?)', flush=True)
+        for s in range(N_PERM):
+            sets['L2perm{}'.format(s)] = hop2(L[0][np.random.default_rng(100 + s).permutation(L[0].shape[0])])
+        c = L[0].mean(0, keepdims=True)
+        sets['L2const'] = hop2(np.repeat(c, L[0].shape[0], 0))
     if args.const_taps and os.path.isdir(args.const_taps):
         Lc = layers_of(args.const_taps)
         sets['Jg'] = np.mean(Lc, 0)
@@ -120,7 +149,7 @@ def main():
     ceiling = json.load(open(ceil_path))
 
     if not args.summary:
-        sets, info = build_inputs(args)
+        sets, info = build_inputs(args, R_tr)
         json.dump(info, open(os.path.join(out, 'inputs.json'), 'w'), indent=1)
         wanted = args.sets.split() or list(sets)
         for name in wanted:
@@ -158,8 +187,20 @@ def summary(out, ev, ceiling, args):
     if not runs:
         print('no runs in', out)
         return
+    for head in HEADS:                       # L2perm = mean of the permutations (per-item MSE averaged)
+        rs = [runs[k] for k in runs if k[1] == head and k[0].startswith('L2perm') and k[0] != 'L2perm']
+        if rs:
+            m = np.mean([r['_mse'] for r in rs], 0)
+            runs[('L2perm', head)] = {'set': 'L2perm', 'head': head, 'in_dim': rs[0]['in_dim'], '_mse': m,
+                                      'mse_eval': float(m[ev].mean()),
+                                      'r2_eval': float(np.mean([r['r2_eval'] for r in rs])),
+                                      'mse_train': float(np.mean([r['mse_train'] for r in rs])),
+                                      'rank_eval': {k: float(np.mean([r['rank_eval'][k] for r in rs]))
+                                                    for k in ('recall@20', 'ndcg@20')}}
     info = json.load(open(os.path.join(out, 'inputs.json'))) if os.path.isfile(os.path.join(out, 'inputs.json')) else {}
-    order = ['J0', 'J1', 'J2', 'J3', 'JD', 'Jg'] + sorted({k[0] for k in runs if k[0].startswith('L')})
+    layers = sorted({k[0] for k in runs if k[0][0] == 'L' and k[0][1:].isdigit()})
+    order = ['J0', 'J1', 'J2', 'J3', 'JD', 'Jg'] + layers + \
+        sorted({k[0] for k in runs if k[0].startswith('L2perm') and k[0] != 'L2perm'}) + ['L2perm', 'L2const']
     lines = ['# Stage 2a: Text before / after graph -> ID preference ({})\n'.format(os.path.basename(out)),
              'Target: frozen ID teacher item embedding (standardised). Eval items: {}. Text teacher layers: {}; '
              'const teacher layers: {}. Ranking ceiling U_id . Y on eval items: R@20 {:.4f}.\n'.format(

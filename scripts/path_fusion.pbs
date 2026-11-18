@@ -1,0 +1,31 @@
+#!/bin/bash
+#PBS -N path_fusion
+#PBS -q small_gpuq
+#PBS -l select=1:ncpus=8:ngpus=1:mem=16gb
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#
+# Stage 2a, two steps on the existing taps (run scripts/text_graph_probe.pbs first for this dataset):
+#   1. source of L2: probes on L2perm0-2 (text shuffled across items) and L2const (graph structure only);
+#      finished probe runs are skipped, so only the new inputs are fitted; summary.md is rewritten
+#   2. pathway fusion: F0 ID, F1 SF(ID, Text), F2 SF(ID, text-origin), F3 SF(ID, user-origin),
+#      F4 selective (ID, TO, UO); full-catalog test R@20 / N@20 -> results/path_fusion/<DS>/summary.md
+#
+#   qsub -v DS=dbbook scripts/path_fusion.pbs
+#   qsub -v DS=baby,STEPS=2 scripts/path_fusion.pbs        # only step 2
+
+cd "$PBS_O_WORKDIR" || exit 1
+source "$HOME/miniconda3/etc/profile.d/conda.sh"
+conda activate "${CONDA_ENV:-Astar}"
+[ -n "${DS:-}" ] || { echo "DS not set"; exit 1; }
+STEPS=${STEPS:-"1 2"}
+echo "Job $PBS_JOBID on $(hostname), dataset $DS, steps $STEPS, $(date '+%F %T')"
+
+for S in $STEPS; do
+    if [ "$S" = "1" ]; then
+        python -u tools/text_graph_probe.py -d "$DS" || exit 1
+    elif [ "$S" = "2" ]; then
+        python -u tools/path_fusion.py -d "$DS" || exit 1
+    fi
+done
+echo "Done $(date '+%F %T')"
