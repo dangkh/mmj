@@ -10,6 +10,8 @@
 #   JOBS="IDcorr B2d" bash scripts/submit_consolidate.sh dbbook     # controls only (finished runs are skipped)
 #   JOBS="CAT GATE SF" bash scripts/submit_consolidate.sh dbbook    # fusion baselines on the same teachers
 #   JOBS="FG FGu" bash scripts/submit_consolidate.sh dbbook baby     # preference-conditioned feature gating
+#   JOBS="SFL SFu" bash scripts/submit_consolidate.sh dbbook baby    # learnable score-fusion weights (fit on train)
+#   FIT=valid JOBS="SF SFL SFu FG" bash scripts/submit_consolidate.sh dbbook baby   # fitted out of sample
 # Afterwards (summary only, a few seconds):  qsub -v DS=dbbook,STEP=summary scripts/consolidate.pbs
 #   or directly: python tools/consolidate.py -d dbbook --summary --id_taps taps/LightGCNC-dbbook-teacher_id \
 #                    --text_taps taps/LightGCNC-dbbook-teacher_text
@@ -18,7 +20,9 @@ set -eu
 cd "$(dirname "$0")/.."
 QUEUE="${QUEUE:-small_gpuq}"
 SEEDS="${SEEDS:-999}"
-JOBS="${JOBS:-B2 B3}"     # grids to submit: any of B2 B3 B2d B3d IDcorr CAT GATE SF FG FGu (B3, B3d: one job per lam_J)
+JOBS="${JOBS:-B2 B3}"     # grids to submit: any of B2 B3 B2d B3d IDcorr CAT GATE SF FG FGu SFL SFu (B3, B3d: one job per lam_J)
+FIT="${FIT:-train}"       # train | valid (fit the learnable part on half of the valid interactions)
+SUF=""; [ "$FIT" = "train" ] || SUF="_f$FIT"
 mkdir -p results/consolidate/logs
 
 sub() {   # sub NAME DEPEND VARS -> prints the job id
@@ -42,10 +46,10 @@ for DS in "$@"; do
     DEP=$(IFS=:; echo "${DEPS[*]:-}")
     for J in $JOBS; do
         case "$J" in
-            B2|B2d|IDcorr|CAT|GATE|SF|FG|FGu) sub "ct_${DS}_${J}" "$DEP" "DS=$DS,STEP=grid,MODES=$J,SEEDS=$SEEDS" > /dev/null ;;
+            B2|B2d|IDcorr|CAT|GATE|SF|FG|FGu|SFL|SFu) sub "ct_${DS}_${J}${SUF}" "$DEP" "DS=$DS,STEP=grid,MODES=$J,SEEDS=$SEEDS,FIT=$FIT" > /dev/null ;;
             B3|B3d)
-                sub "ct_${DS}_${J}a" "$DEP" "DS=$DS,STEP=grid,MODES=$J,LAMJ=0.1,SEEDS=$SEEDS" > /dev/null
-                sub "ct_${DS}_${J}b" "$DEP" "DS=$DS,STEP=grid,MODES=$J,LAMJ=1,SEEDS=$SEEDS" > /dev/null ;;
+                sub "ct_${DS}_${J}a${SUF}" "$DEP" "DS=$DS,STEP=grid,MODES=$J,LAMJ=0.1,SEEDS=$SEEDS,FIT=$FIT" > /dev/null
+                sub "ct_${DS}_${J}b${SUF}" "$DEP" "DS=$DS,STEP=grid,MODES=$J,LAMJ=1,SEEDS=$SEEDS,FIT=$FIT" > /dev/null ;;
             *) echo "unknown job $J" >&2 ;;
         esac
     done

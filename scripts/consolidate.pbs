@@ -9,10 +9,12 @@
 # them with dependencies). Steps (STEP):
 #   teacher   SRC=id|text: LightGCNC with the best setting of the teacher study (log <SRC>_grid), seed 999,
 #             --save_taps=True -> taps/LightGCNC-<DS>-teacher_<SRC>
-#   grid      MODES = B2 | B3 | B2d | B3d | IDcorr | CAT | GATE | SF | FG | FGu, optional LAMJ=0.1|1 (B3/B3d): grid on valid with the first
+#   grid      MODES = B2 | B3 | B2d | B3d | IDcorr | CAT | GATE | SF | FG | FGu | SFL | SFu, optional LAMJ=0.1|1 (B3/B3d): grid on valid with the first
 #             seed of SEEDS (default 999); no extra seeds
 #   finals    best setting per mode over ALL finished grid runs, run for every seed of SEEDS, then summary
 #   summary   table only (results/consolidate/<DS>/summary.md)
+#   FIT=train (default) | valid: where the learnable part is fitted (valid: 50/50 split of the valid
+#             interactions, results in results/consolidate_fitvalid/<DS>)
 # Finished runs are skipped everywhere.
 #
 #   qsub -v DS=dbbook,STEP=teacher,SRC=id scripts/consolidate.pbs
@@ -25,12 +27,12 @@ conda activate "${CONDA_ENV:-Astar}"
 [ -n "${DS:-}" ] || { echo "DS not set"; exit 1; }
 STEP="${STEP:-grid}"
 SEEDS="${SEEDS:-999}"
-echo "Job $PBS_JOBID on $(hostname), dataset $DS, step $STEP ${SRC:-} ${MODES:-} ${LAMJ:+lam_J=$LAMJ}, seeds $SEEDS, $(date '+%F %T')"
+echo "Job $PBS_JOBID on $(hostname), dataset $DS, step $STEP ${SRC:-} ${MODES:-} ${LAMJ:+lam_J=$LAMJ}, seeds $SEEDS, fit ${FIT:-train}, $(date '+%F %T')"
 nvidia-smi
 
 TAPS_ID="taps/LightGCNC-${DS}-teacher_id"
 TAPS_T="taps/LightGCNC-${DS}-teacher_text"
-CONS=(python -u tools/consolidate.py -d "$DS" --id_taps "$TAPS_ID" --text_taps "$TAPS_T" --seeds "$SEEDS")
+CONS=(python -u tools/consolidate.py -d "$DS" --id_taps "$TAPS_ID" --text_taps "$TAPS_T" --seeds "$SEEDS" --fit "${FIT:-train}")
 
 case "$STEP" in
     teacher)
@@ -47,7 +49,7 @@ case "$STEP" in
         "${CONS[@]}" --grid --no_finals --modes "${MODES:-B2 B3}" ${LAMJ:+--fix "lam_J=$LAMJ"} || exit 1
         ;;
     finals)
-        "${CONS[@]}" --grid --modes "${MODES:-B2 B3 B2d B3d IDcorr CAT GATE SF FG FGu}" || exit 1
+        "${CONS[@]}" --grid --modes "${MODES:-B2 B3 B2d B3d IDcorr CAT GATE SF FG FGu SFL SFu}" || exit 1
         ;;
     summary)
         "${CONS[@]}" --summary || exit 1
