@@ -95,6 +95,14 @@ def _lightgcn(m):
     return {'T3': i, 'T3_user': u}
 
 
+def _lightgcnc(m):
+    """LightGCNC: final embeddings plus the item embedding of every layer (T_item_l0 = layer 0, e.g. E_T(text))."""
+    out = _lightgcn(m)
+    for l, x in enumerate(m.item_layers()):
+        out['T_item_l{}'.format(l)] = x
+    return out
+
+
 ADAPTERS = {
     'DRAGON': _dragon,
     'DRAGONID': _dragon,   # visual branch = item-ID table (src/models/dragonid.py)
@@ -103,7 +111,7 @@ ADAPTERS = {
     'LATTICE': _lattice,
     'MGCN': _mgcn,
     'LIGHTGCN': _lightgcn,
-    'LIGHTGCNC': _lightgcn,  # LightGCN with content item embeddings (src/models/lightgcnc.py)
+    'LIGHTGCNC': _lightgcnc,  # LightGCN with content item embeddings (src/models/lightgcnc.py), per-layer items
 }
 
 

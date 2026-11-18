@@ -20,10 +20,10 @@ import pandas as pd
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOG_DIR = os.path.join(ROOT, 'src', 'log')
-BASE_SOURCES = ('id', 'id128', 'text', 'visual', 'tv', 'idtext', 'idtext_free', 'idtext_none', 'idvisual', 'idtv')
+BASE_SOURCES = ('id', 'id128', 'text', 'visual', 'tv', 'const', 'idtext', 'idtext_free', 'idtext_none', 'idvisual', 'idtv')
 SOURCES = tuple(b + g for b in BASE_SOURCES for g in ('', '_gtext', '_gvisual', '_gtv'))
 GRAPH_LABEL = {'': '', '_gtext': ' + item graph (text)', '_gvisual': ' + item graph (visual)', '_gtv': ' + item graph (tv)'}
-LABEL = {'id': 'ID only', 'id128': 'ID only (128-d)', 'text': 'Text only', 'visual': 'Visual only',
+LABEL = {'const': 'No item content (const layer 0)', 'id': 'ID only', 'id128': 'ID only (128-d)', 'text': 'Text only', 'visual': 'Visual only',
          'tv': 'Text + Visual', 'idtext': 'ID + Text (a_u)', 'idtext_free': 'ID + Text (DRAGON free w)',
          'idtext_none': 'ID + Text (no weights)', 'idvisual': 'ID + Visual (a_u)', 'idtv': 'ID + Text + Visual (a_u)'}
 ALPHA = re.compile(r'user weight of the ID channel a_u: mean ([0-9.]+), sd ([0-9.]+)')

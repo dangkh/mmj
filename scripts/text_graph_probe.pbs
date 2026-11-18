@@ -1,0 +1,51 @@
+#!/bin/bash
+#PBS -N text_graph
+#PBS -q small_gpuq
+#PBS -l select=1:ncpus=8:ngpus=1:mem=16gb
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#
+# Stage 2a (tools/text_graph_probe.py), one dataset, sequential; finished steps are skipped:
+#   1. item split of E-A if missing (tools/make_item_split.py)
+#   2. Text teacher with per-layer taps: LightGCNC item_input=text, best setting of text_grid, seed 999
+#      -> taps/LightGCNC-<DS>-teacher_text_layers   (T_item_l0 = E_T(text), T_item_l1..L)
+#   3. (CONST=1, default) control teacher item_input=const: grid const_grid (n_layers x reg, seed 999),
+#      then the best setting with per-layer taps -> taps/LightGCNC-<DS>-teacher_const_layers
+#   4. probes J0-J3, JD, Jg, per layer; heads lin, mlp1, mlp2; summary.md
+#
+#   qsub -v DS=dbbook scripts/text_graph_probe.pbs
+#   qsub -v DS=baby,CONST=0 scripts/text_graph_probe.pbs      # without the const control
+
+cd "$PBS_O_WORKDIR" || exit 1
+source "$HOME/miniconda3/etc/profile.d/conda.sh"
+conda activate "${CONDA_ENV:-Astar}"
+[ -n "${DS:-}" ] || { echo "DS not set"; exit 1; }
+echo "Job $PBS_JOBID on $(hostname), dataset $DS, const control ${CONST:-1}, $(date '+%F %T')"
+nvidia-smi
+
+done_run() { python tools/best_params.py LightGCNC "$DS" "$1" > /dev/null 2>&1; }
+
+python -u tools/make_item_split.py -d "$DS" || exit 1
+
+teacher_layers() {   # teacher_layers SRC GRID_NAME
+    local SRC=$1 GRID=$2 TAPS="taps/LightGCNC-${DS}-teacher_${1}_layers" P
+    if [ -f "$TAPS/T_item_l0.npy" ]; then echo "[skip] $TAPS exists"; return 0; fi
+    P=$(python tools/best_params.py LightGCNC "$DS" "$GRID") || { echo "no finished $GRID log for $DS"; return 1; }
+    echo "===== teacher $SRC with per-layer taps: $P ====="
+    # shellcheck disable=SC2086
+    (cd src && python -u main.py -m LightGCNC -d "$DS" --item_input="$SRC" $P --seed=999 \
+        --save_taps=True --exp_name="teacher_${SRC}_layers")
+}
+
+teacher_layers text text_grid || exit 1
+
+if [ "${CONST:-1}" = "1" ]; then
+    if ! done_run const_grid; then
+        echo "===== const_grid ====="
+        (cd src && python -u main.py -m LightGCNC -d "$DS" --item_input=const --seed=999 --exp_name=const_grid)
+    fi
+    teacher_layers const const_grid || echo "const control failed: Jg will be skipped"
+fi
+
+python -u tools/text_graph_probe.py -d "$DS"
+echo "Done $(date '+%F %T')"

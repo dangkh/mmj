@@ -7,6 +7,8 @@ Single channel (64-d):
     --item_input=text     E(t_i): 2-layer MLP on the standardised text feature, no item-ID parameters
     --item_input=visual   E(v_i): same on the visual feature
     --item_input=tv       E([t_i; v_i])
+    --item_input=const    one learned vector shared by ALL items (no item information at layer 0): items
+                          differ only through propagation, i.e. graph + user embeddings (control)
 Two channels, ID + content, as DRAGON's construction='cat' (2 x 64-d):
     --item_input=id+text | id+visual | id+tv
     item  [i_id ; E(x_i)]                       (concatenated)
@@ -41,7 +43,7 @@ from common.abstract_recommender import GeneralRecommender
 from common.loss import BPRLoss, EmbLoss
 from models.lightgcn import LightGCN
 
-SOURCES = ('id', 'text', 'visual', 'tv', 'id+text', 'id+visual', 'id+tv')
+SOURCES = ('id', 'text', 'visual', 'tv', 'const', 'id+text', 'id+visual', 'id+tv')
 USER_WEIGHTS = ('softmax', 'free', 'none')
 ITEM_GRAPHS = ('none', 'text', 'visual', 'tv')
 
@@ -58,7 +60,7 @@ class LightGCNC(LightGCN):
             raise ValueError('item_input must be one of {}'.format(SOURCES))
         self.has_id = self.item_input == 'id' or self.item_input.startswith('id+')
         self.content = self.item_input.split('+', 1)[1] if self.item_input.startswith('id+') else \
-            (None if self.item_input == 'id' else self.item_input)
+            (None if self.item_input in ('id', 'const') else self.item_input)
         self.two_channel = self.has_id and self.content is not None
         self.user_weight = config['user_weight'] or 'softmax'
         if self.user_weight not in USER_WEIGHTS:
@@ -71,6 +73,8 @@ class LightGCNC(LightGCN):
         params = {'user_emb': nn.Parameter(init(torch.empty(self.n_users, d)))}
         if self.has_id:
             params['item_emb'] = nn.Parameter(init(torch.empty(self.n_items, d)))
+        if self.item_input == 'const':
+            params['item_const'] = nn.Parameter(init(torch.empty(1, d)))
         if self.two_channel:
             params['user_emb_c'] = nn.Parameter(init(torch.empty(self.n_users, d)))
             if self.user_weight == 'softmax':
@@ -144,9 +148,23 @@ class LightGCNC(LightGCN):
             items.append(self.embedding_dict['item_emb'])
         if self.content is not None:
             items.append(self.item_proj(self.feat_dropout(self.item_feat)))
+        if self.item_input == 'const':
+            items.append(self.embedding_dict['item_const'].expand(self.n_items, -1))
         if self.two_channel:
             users.append(self.embedding_dict['user_emb_c'])
         return torch.cat(users, 1), torch.cat(items, 1)
+
+    @torch.no_grad()
+    def item_layers(self):
+        """Item embeddings at every propagation layer, [T^(0), T^(1), ..., T^(L)] (before averaging and
+        before the optional item-item graph). T^(0) is the layer-0 item embedding (e.g. E_T(text))."""
+        u0, i0 = self.ego()
+        x = torch.cat([u0, i0], 0)
+        layers = [x[self.n_users:]]
+        for _ in range(self.n_layers):
+            x = torch.sparse.mm(self.norm_adj_matrix, x)
+            layers.append(x[self.n_users:])
+        return layers
 
     def user_weights(self):
         """(n_users, 2): weight of the ID channel and of the content channel."""

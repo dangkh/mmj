@@ -8,6 +8,7 @@
 # Teacher study: LightGCNC with the layer-0 item embedding from ID, text, visual or text+visual, and the
 # two-channel ID + content model of DRAGON (src/models/lightgcnc.py). Source tokens:
 #   id text visual tv            single channel (64-d)
+#   const                        control: one shared layer-0 vector for all items (graph + users only)
 #   id128                        ID only with 128-d embeddings (capacity of the two-channel models)
 #   idtext idvisual idtv         ID + content: item [i_id; E(x)], user [a_u u_id; (1-a_u) u_c] (softmax a_u)
 #   idtext:free idtext:none      same with DRAGON's free user weights / without weights (plain concat)
@@ -52,7 +53,7 @@ src_args() {   # token[:user_weight][@item_graph] -> LightGCNC arguments
     TOK=${BASE%%:*}; UW=${BASE#*:}
     [ "$UW" = "$BASE" ] && UW=""
     case "$TOK" in
-        id|text|visual|tv) A="--item_input=$TOK" ;;
+        id|text|visual|tv|const) A="--item_input=$TOK" ;;
         id128) A="--item_input=id --embedding_size=128" ;;
         idtext|idvisual|idtv) A="--item_input=id+${TOK#id}${UW:+ --user_weight=$UW}" ;;
         *) echo "unknown source $1" >&2; return 1 ;;
