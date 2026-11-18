@@ -2,7 +2,7 @@
 #PBS -N path_fusion
 #PBS -q small_gpuq
 #PBS -l select=1:ncpus=8:ngpus=1:mem=16gb
-#PBS -l walltime=12:00:00
+#PBS -l walltime=01:00:00
 #PBS -j oe
 #
 # Stage 2a, two steps on the existing taps (run scripts/text_graph_probe.pbs first for this dataset):

@@ -20,12 +20,13 @@ import pandas as pd
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOG_DIR = os.path.join(ROOT, 'src', 'log')
-BASE_SOURCES = ('id', 'id128', 'text', 'visual', 'tv', 'const', 'idtext', 'idtext_free', 'idtext_none', 'idvisual', 'idtv')
+BASE_SOURCES = ('id', 'id128', 'text', 'visual', 'tv', 'const', 'idtext', 'idtext_free', 'idtext_none', 'idvisual', 'idtv', 'idid', 'idid_free', 'idid_none')
 SOURCES = tuple(b + g for b in BASE_SOURCES for g in ('', '_gtext', '_gvisual', '_gtv'))
 GRAPH_LABEL = {'': '', '_gtext': ' + item graph (text)', '_gvisual': ' + item graph (visual)', '_gtv': ' + item graph (tv)'}
 LABEL = {'const': 'No item content (const layer 0)', 'id': 'ID only', 'id128': 'ID only (128-d)', 'text': 'Text only', 'visual': 'Visual only',
          'tv': 'Text + Visual', 'idtext': 'ID + Text (a_u)', 'idtext_free': 'ID + Text (DRAGON free w)',
-         'idtext_none': 'ID + Text (no weights)', 'idvisual': 'ID + Visual (a_u)', 'idtv': 'ID + Text + Visual (a_u)'}
+         'idtext_none': 'ID + Text (no weights)', 'idvisual': 'ID + Visual (a_u)', 'idtv': 'ID + Text + Visual (a_u)',
+         'idid': 'ID + ID (a_u)', 'idid_free': 'ID + ID (DRAGON free w)', 'idid_none': 'ID + ID (no weights)'}
 ALPHA = re.compile(r'user weight of the ID channel a_u: mean ([0-9.]+), sd ([0-9.]+)')
 METRICS = ('recall@20', 'ndcg@20', 'recall@10', 'ndcg@10')
 

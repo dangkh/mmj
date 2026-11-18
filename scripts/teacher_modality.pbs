@@ -12,6 +12,7 @@
 #   id128                        ID only with 128-d embeddings (capacity of the two-channel models)
 #   idtext idvisual idtv         ID + content: item [i_id; E(x)], user [a_u u_id; (1-a_u) u_c] (softmax a_u)
 #   idtext:free idtext:none      same with DRAGON's free user weights / without weights (plain concat)
+#   idid (idid:free, idid:none)  control: two independent ID tables in the two channels (no content)
 #   <token>@text|visual|tv       add the DRAGON item-item kNN graph built from that feature, applied to the
 #                                (fused) item representation after propagation: i <- i + A i
 #                                e.g. idtext@tv (DRAGON-like), idtext@text, id@text (graph only, ID items)
@@ -55,7 +56,7 @@ src_args() {   # token[:user_weight][@item_graph] -> LightGCNC arguments
     case "$TOK" in
         id|text|visual|tv|const) A="--item_input=$TOK" ;;
         id128) A="--item_input=id --embedding_size=128" ;;
-        idtext|idvisual|idtv) A="--item_input=id+${TOK#id}${UW:+ --user_weight=$UW}" ;;
+        idtext|idvisual|idtv|idid) A="--item_input=id+${TOK#id}${UW:+ --user_weight=$UW}" ;;
         *) echo "unknown source $1" >&2; return 1 ;;
     esac
     case "$G" in

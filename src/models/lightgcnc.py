@@ -43,7 +43,7 @@ from common.abstract_recommender import GeneralRecommender
 from common.loss import BPRLoss, EmbLoss
 from models.lightgcn import LightGCN
 
-SOURCES = ('id', 'text', 'visual', 'tv', 'const', 'id+text', 'id+visual', 'id+tv')
+SOURCES = ('id', 'text', 'visual', 'tv', 'const', 'id+text', 'id+visual', 'id+tv', 'id+id')
 USER_WEIGHTS = ('softmax', 'free', 'none')
 ITEM_GRAPHS = ('none', 'text', 'visual', 'tv')
 # Which propagation layers form the output (bipartite graph: even item layers come from item vectors, odd item
@@ -65,9 +65,10 @@ class LightGCNC(LightGCN):
         if self.item_input not in SOURCES:
             raise ValueError('item_input must be one of {}'.format(SOURCES))
         self.has_id = self.item_input == 'id' or self.item_input.startswith('id+')
-        self.content = self.item_input.split('+', 1)[1] if self.item_input.startswith('id+') else \
-            (None if self.item_input in ('id', 'const') else self.item_input)
-        self.two_channel = self.has_id and self.content is not None
+        self.second_id = self.item_input == 'id+id'      # control: second ID table instead of content
+        self.content = None if self.second_id else (self.item_input.split('+', 1)[1] if self.item_input.startswith('id+') else
+                                                     (None if self.item_input in ('id', 'const') else self.item_input))
+        self.two_channel = self.has_id and (self.content is not None or self.second_id)
         self.user_weight = config['user_weight'] or 'softmax'
         if self.user_weight not in USER_WEIGHTS:
             raise ValueError('user_weight must be one of {}'.format(USER_WEIGHTS))
@@ -79,6 +80,8 @@ class LightGCNC(LightGCN):
         params = {'user_emb': nn.Parameter(init(torch.empty(self.n_users, d)))}
         if self.has_id:
             params['item_emb'] = nn.Parameter(init(torch.empty(self.n_items, d)))
+        if self.second_id:
+            params['item_emb_c'] = nn.Parameter(init(torch.empty(self.n_items, d)))
         if self.item_input == 'const':
             params['item_const'] = nn.Parameter(init(torch.empty(1, d)))
         if self.two_channel:
@@ -159,6 +162,8 @@ class LightGCNC(LightGCN):
             items.append(self.embedding_dict['item_emb'])
         if self.content is not None:
             items.append(self.item_proj(self.feat_dropout(self.item_feat)))
+        if self.second_id:
+            items.append(self.embedding_dict['item_emb_c'])
         if self.item_input == 'const':
             items.append(self.embedding_dict['item_const'].expand(self.n_items, -1))
         if self.two_channel:
