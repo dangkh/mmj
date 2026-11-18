@@ -25,6 +25,12 @@ Fusion baselines on the same frozen teachers (no s_ID shortcut):
     SF      score-level fusion: s = (1 - a) z(s_ID) + a z(s_T), a in {0, 0.05, ..., 1} chosen on valid
             (z = standardised scores); no training
     CAT and GATE use the grid of B2 (lam_D = L2 weight on the fused embeddings) x lr: same budget.
+Preference-conditioned feature gating of the text channel (frozen teachers, only the gate is learned):
+    FG      s = s_ID + <U_t[u], A_i * Y_t[i]>,  A_i = sigmoid(f([Y_id[i]; Y_t[i]])) in [0,1]^d per item
+    FGu     A_ui = A_i * B_u,  B_u = sigmoid(h([U_id[u]; U_t[u]])): user conditioning in a separable form
+            (full ranking stays one matrix product)
+    f, h: 2-layer MLPs; the last bias of f is -4 (A ~ 0.02, the model starts close to B0), of h +4 (B ~ 1).
+    Penalty lam_D E[Delta^2] with Delta = the gated text score; grid of B2. Gate statistics are saved.
     L = BPR(s) + lam_J L_J + lam_D E[Delta_T^2]
 
 B2 and B3 have the same modules and parameter count (P exists in B2 but receives no gradient). The last
@@ -61,8 +67,10 @@ GRID = {'B2': {'lam_D': [0.0, 1e-3, 1e-2, 1e-1], 'lr': [1e-3, 1e-4]},
         'B3': {'lam_D': [0.0, 1e-3, 1e-2, 1e-1], 'lr': [1e-3, 1e-4], 'lam_J': [0.1, 1.0]}}
 GRID['B2d'], GRID['B3d'], GRID['IDcorr'] = GRID['B2'], GRID['B3'], GRID['B2']
 GRID['CAT'], GRID['GATE'] = GRID['B2'], GRID['B2']      # lam_D = L2 weight on the fused embeddings here
-MODES = ('B2', 'B3', 'B2d', 'B3d', 'IDcorr', 'CAT', 'GATE')
+GRID['FG'], GRID['FGu'] = GRID['B2'], GRID['B2']
+MODES = ('B2', 'B3', 'B2d', 'B3d', 'IDcorr', 'CAT', 'GATE', 'FG', 'FGu')
 CORR_MODES = ('B2', 'B3', 'B2d', 'B3d', 'IDcorr')
+GATE_MODES = ('FG', 'FGu')
 SF_GRID = [round(0.05 * k, 2) for k in range(21)]          # score fusion weight of the text teacher
 
 
@@ -107,8 +115,32 @@ class Consolidator(nn.Module):
             self.A_uid, self.A_ut, self.A_iid, self.A_it = eye_linear(k), eye_linear(k), eye_linear(k), eye_linear(k)
             self.gate_u = mlp(du, hidden, k)
             self.gate_i = mlp(di, hidden, k)
+        elif mode in GATE_MODES:
+            assert Y_id.shape[1] == Y_t.shape[1], 'FG needs equal teacher dims'
+            self.f_gate = mlp(di, hidden, Y_t.shape[1])
+            nn.init.zeros_(self.f_gate[-1].weight)
+            nn.init.constant_(self.f_gate[-1].bias, -4.0)          # A ~ 0.02 at start
+            if mode == 'FGu':
+                self.h_gate = mlp(du, hidden, U_t.shape[1])
+                nn.init.zeros_(self.h_gate[-1].weight)
+                nn.init.constant_(self.h_gate[-1].bias, 4.0)        # B ~ 0.98 at start
         else:
             raise ValueError(mode)
+
+    # ---------------------------------------------------------------- feature gating
+    def item_gate(self, items=None):
+        y_id = self.Y_id if items is None else self.Y_id[items]
+        y_t = self.Y_t if items is None else self.Y_t[items]
+        return torch.sigmoid(self.f_gate(torch.cat([y_id, y_t], 1)))
+
+    def user_gate(self, users=None):
+        u_id = self.U_id if users is None else self.U_id[users]
+        u_t = self.U_t if users is None else self.U_t[users]
+        return torch.sigmoid(self.h_gate(torch.cat([u_id, u_t], 1)))
+
+    def gated_user(self, users):
+        u = self.U_t[users]
+        return u * self.user_gate(users) if self.mode == 'FGu' else u
 
     # ---------------------------------------------------------------- corrections
     def item_side(self, items=None):
@@ -150,6 +182,9 @@ class Consolidator(nn.Module):
 
     # ---------------------------------------------------------------- scores
     def pair_scores(self, users, items):
+        if self.mode in GATE_MODES:
+            delta = (self.gated_user(users) * self.item_gate(items) * self.Y_t[items]).sum(1)
+            return (self.U_id[users] * self.Y_id[items]).sum(1) + delta, delta.pow(2)
         if self.mode in CORR_MODES:
             g = self.user_side(users)
             z, _, _ = self.item_side(items)
@@ -159,11 +194,15 @@ class Consolidator(nn.Module):
         return (eu * ei).sum(1), eu.pow(2).sum(1) + ei.pow(2).sum(1)
 
     def eval_cache(self):
+        if self.mode in GATE_MODES:
+            return self.item_gate() * self.Y_t
         if self.mode in CORR_MODES:
             return self.item_side()[0]
         return self.fused_item()
 
     def full_scores(self, users, cache):
+        if self.mode in GATE_MODES:
+            return self.U_id[users] @ self.Y_id.T + self.gated_user(users) @ cache.T
         if self.mode in CORR_MODES:
             return self.U_id[users] @ self.Y_id.T + self.user_side(users) @ cache.T
         return self.fused_user(users) @ cache.T
@@ -244,6 +283,26 @@ def score_fusion(mats, teachers, device, log=print):
             'test': test, 'curve': curve, 'norm': st}
 
 
+@torch.no_grad()
+def gate_stats(model, R_tr):
+    """What the learned gate does: A over items (and B over users for FGu), per channel and by popularity."""
+    model.eval()
+    A = model.item_gate().cpu().numpy()
+    deg = np.asarray(R_tr.sum(0)).ravel()
+    q = np.quantile(deg, [1 / 3, 2 / 3])
+    groups = {'tail': deg <= q[0], 'mid': (deg > q[0]) & (deg <= q[1]), 'head': deg > q[1]}
+    out = {'gate_item': {'mean': float(A.mean()), 'std_over_items': float(A.mean(1).std()),
+                         'frac_channels_open(>0.5)': float((A > 0.5).mean()),
+                         'per_channel_mean': [float(x) for x in A.mean(0)],
+                         'mean_by_popularity': {k: float(A[m].mean()) for k, m in groups.items()},
+                         'quantiles_item_mean': [float(x) for x in np.quantile(A.mean(1), [0.05, 0.25, 0.5, 0.75, 0.95])]}}
+    if model.mode == 'FGu':
+        B = model.user_gate().cpu().numpy()
+        out['gate_user'] = {'mean': float(B.mean()), 'std_over_users': float(B.mean(1).std()),
+                            'quantiles_user_mean': [float(x) for x in np.quantile(B.mean(1), [0.05, 0.25, 0.5, 0.75, 0.95])]}
+    return out
+
+
 def train(args, mats, teachers, mode, cfg, seed, device, log=print):
     R_tr, R_va, R_te = mats
     R_trva = (R_tr + R_va).tocsr()
@@ -295,8 +354,9 @@ def train(args, mats, teachers, mode, cfg, seed, device, log=print):
                 break
     model.load_state_dict(best_state)
     test = rank_eval(model, R_tr, R_te, R_trva, device)
+    extra = gate_stats(model, R_tr) if mode in GATE_MODES else {}
     return {'mode': mode, 'cfg': cfg, 'seed': seed, 'best_epoch': best_ep, 'valid': best, 'test': test,
-            'history': hist}
+            'history': hist, **extra}
 
 
 def cfg_tag(c):
@@ -450,8 +510,17 @@ def write_summary(out, b0, seeds):
         lines.append('| SF | a={:g} (text weight, z-scored scores) | {} | - | - | {:.4f} | {:.4f} | {:.4f} | {:+.2f}% |'.format(
             r['cfg']['a'], len(r['curve']), r['valid']['recall@20'], r['test']['recall@20'], r['test']['ndcg@20'],
             100 * (r['test']['recall@20'] / b0['test']['recall@20'] - 1)))
-    lines.append('\nCorrections (B2, B3, B2d, B3d, IDcorr): best epoch 0 = B0 itself (no useful correction on valid). '
-                 'CAT / GATE start from a random fusion; SF has no training.')
+    for mode, cfg, finals, n_grid in rows:
+        if mode in GATE_MODES and 'gate_item' in finals[0]:
+            g = finals[0]['gate_item']
+            lines.append('\n{} gate (seed {}): mean A {:.3f}, channels open (>0.5) {:.1%}, item-mean quantiles '
+                         '5/25/50/75/95% {}, by popularity tail/mid/head {:.3f}/{:.3f}/{:.3f}'.format(
+                             mode, finals[0]['seed'], g['mean'], g['frac_channels_open(>0.5)'],
+                             ' '.join('{:.3f}'.format(x) for x in g['quantiles_item_mean']),
+                             g['mean_by_popularity']['tail'], g['mean_by_popularity']['mid'],
+                             g['mean_by_popularity']['head']))
+    lines.append('\nCorrections (B2, B3, B2d, B3d, IDcorr) and gates (FG, FGu): best epoch 0 = B0 itself (nothing useful '
+                 'learned on valid). CAT / GATE start from a random fusion; SF has no training.')
     text = '\n'.join(lines) + '\n'
     open(os.path.join(out, 'summary.md'), 'w').write(text)
     print(text)
