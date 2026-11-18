@@ -46,6 +46,12 @@ from models.lightgcn import LightGCN
 SOURCES = ('id', 'text', 'visual', 'tv', 'const', 'id+text', 'id+visual', 'id+tv')
 USER_WEIGHTS = ('softmax', 'free', 'none')
 ITEM_GRAPHS = ('none', 'text', 'visual', 'tv')
+# Which propagation layers form the output (bipartite graph: even item layers come from item vectors, odd item
+# layers from the user table; even user layers from the user table, odd user layers from item vectors):
+#   all   items and users: mean of all layers (LightGCN)
+#   to    items: mean of the even layers (text-origin pathway); users: mean of all layers
+#   pure  items: even layers; users: odd layers -> the score uses item vectors only (no free user table)
+LAYER_MODES = ('all', 'to', 'pure')
 
 
 class LightGCNC(LightGCN):
@@ -102,6 +108,11 @@ class LightGCNC(LightGCN):
                 self.item_proj = nn.Sequential(nn.Linear(X.shape[1], hidden), nn.LeakyReLU(), nn.Linear(hidden, d))
             self.feat_dropout = nn.Dropout(config['feat_dropout'] or 0.0)
         self.norm_adj_matrix = self.get_norm_adj_mat().to(self.device)
+        self.layer_mode = config['layer_mode'] or 'all'
+        if self.layer_mode not in LAYER_MODES:
+            raise ValueError('layer_mode must be one of {}'.format(LAYER_MODES))
+        if self.layer_mode == 'pure' and self.n_layers < 1:
+            raise ValueError('layer_mode=pure needs n_layers >= 1 (users are built from odd layers)')
 
         self.item_graph = config['item_graph'] or 'none'
         if self.item_graph not in ITEM_GRAPHS:
@@ -180,8 +191,12 @@ class LightGCNC(LightGCN):
         for _ in range(self.n_layers):
             x = torch.sparse.mm(self.norm_adj_matrix, x)
             layers.append(x)
-        out = torch.stack(layers, 1).mean(1)
-        u, i = out[:self.n_users], out[self.n_users:]
+        if self.layer_mode == 'all':
+            out = torch.stack(layers, 1).mean(1)
+            u, i = out[:self.n_users], out[self.n_users:]
+        else:
+            i = torch.stack(layers[0::2], 1).mean(1)[self.n_users:]
+            u = torch.stack(layers if self.layer_mode == 'to' else layers[1::2], 1).mean(1)[:self.n_users]
         if self.two_channel:
             w = self.user_weights()
             d = self.latent_dim

@@ -22,7 +22,12 @@ Weights chosen on valid R@20 (F1-F3: a in {0, 0.05, ..., 1}; F4: simplex step 0.
 reported on test (full catalog; valid masks train, test masks train + valid). Also each scorer alone.
 Paired bootstrap over test users (R@20, N@20): F2-F3, F2-F1, F3-F1, F4-F1, F1-F0, F2-F0, F3-F0.
 
+Extra text teachers (--teachers "to pure"): taps/LightGCNC-<ds>-teacher_text_<name>, e.g. a Text teacher trained
+with layer_mode=to (items = even layers only). For each: T_<name> alone and G_<name> = SF(ID, <name>), with
+bootstrap against F1, F2 and F0.
+
     python tools/path_fusion.py -d dbbook
+    python tools/path_fusion.py -d dbbook --teachers "to pure"
 Output: results/path_fusion/<ds>/{results.json, summary.md}
 """
 import argparse
@@ -58,11 +63,12 @@ def layers_of(path):
 class Scorer:
     """z-normalised score components on the device; combine(weights) -> score_batch for evaluate()."""
 
-    def __init__(self, U_id, Y_id, U_t, items, device):
+    def __init__(self, U_id, Y_id, U_t, items, device, extra=None):
         self.dev = device
         t = lambda x: torch.from_numpy(x).to(device)  # noqa: E731
         self.comp = {'ID': (t(U_id), t(Y_id))}
         self.comp.update({k: (t(U_t), t(Y)) for k, Y in items.items()})
+        self.comp.update({k: (t(U), t(Y)) for k, (U, Y) in (extra or {}).items()})
         self.st = {k: zstats(U, Y) for k, (U, Y) in self.comp.items()}
 
     @torch.no_grad()
@@ -98,6 +104,7 @@ def main():
     ap.add_argument('--text_taps', default=None)
     ap.add_argument('--out_dir', default=os.path.join(ROOT, 'results', 'path_fusion'))
     ap.add_argument('--n_boot', type=int, default=10000)
+    ap.add_argument('--teachers', default='', help='extra text teachers, e.g. "to pure" (taps ...-teacher_text_<name>)')
     ap.add_argument('--cpu', action='store_true')
     args = ap.parse_args()
     taps = lambda name: os.path.join(ROOT, 'taps', 'LightGCNC-{}-{}'.format(args.dataset, name))  # noqa: E731
@@ -120,7 +127,18 @@ def main():
     assert (n_users, n_items) == (U_id.shape[0], Y_id.shape[0]) == (U_t.shape[0], L[0].shape[0])
     sel = (R_tr, R_va, R_tr)                    # hist, gt, mask (as SF in consolidate.py)
     tst = (R_tr, R_te, binary(R_tr, R_va))
-    S = Scorer(U_id, Y_id, U_t, items, device)
+    extra = {}
+    for name in args.teachers.split():
+        d = taps('teacher_text_' + name)
+        if not os.path.isfile(os.path.join(d, 'T3.npy')):
+            print('[fusion] no taps for teacher {} at {}: skipped'.format(name, d), flush=True)
+            continue
+        extra[name] = (np.load(os.path.join(d, 'T3_user.npy')).astype(np.float32),
+                       np.load(os.path.join(d, 'T3.npy')).astype(np.float32))
+        meta = os.path.join(d, 'meta.json')
+        if os.path.isfile(meta):
+            print('[fusion] teacher {}: {}'.format(name, json.load(open(meta)).get('config', '')), flush=True)
+    S = Scorer(U_id, Y_id, U_t, items, device, extra)
 
     res, per_user = {}, {}
 
@@ -152,18 +170,26 @@ def main():
     best = max(near, key=val)
     run('F4', dict(zip(('ID', 'TO', 'UO'), (round(x, 2) for x in best))))
     res['F4']['grid_points'] = len(cache)
+    pairs = list(PAIRS)
+    for name in extra:
+        run('T_' + name, {name: 1.0})
+        a = max(SF_GRID, key=lambda a: rank(S, {'ID': 1 - a, name: a}, *sel)[0]['recall@20'])
+        run('G_' + name, {'ID': 1 - a, name: a})
+        pairs += [('G_' + name, 'F1', 'SF(ID, {}) vs SF(ID, Text)'.format(name)),
+                  ('G_' + name, 'F2', 'SF(ID, {}) vs SF(ID, post-hoc TO)'.format(name)),
+                  ('G_' + name, 'F0', 'SF(ID, {}) vs ID'.format(name))]
 
     boot = []
-    for a, b, meaning in PAIRS:
+    for a, b, meaning in pairs:
         for j, metric in enumerate(('recall@20', 'ndcg@20')):
             bt = paired_bootstrap(per_user[a][j] - per_user[b][j], n_boot=args.n_boot)
             boot.append({'a': a, 'b': b, 'meaning': meaning, 'metric': metric, **bt})
     json.dump({'results': res, 'bootstrap': boot, 'norm': S.st, 'n_layers': len(L) - 1, 'T3_gap': gap},
               open(os.path.join(out, 'results.json'), 'w'), indent=1)
-    write_summary(out, args.dataset, res, boot, len(L) - 1)
+    write_summary(out, args.dataset, res, boot, len(L) - 1, list(extra))
 
 
-def write_summary(out, ds, res, boot, n_layers):
+def write_summary(out, ds, res, boot, n_layers, extra=()):
     label = {'F0': 'ID only', 'T_full': 'Text teacher alone (full)', 'T_TO': 'text-origin alone',
              'T_UO': 'user-origin alone', 'F1': 'SF(ID, full Text)', 'F2': 'SF(ID, text-origin)',
              'F3': 'SF(ID, user-origin)', 'F4': 'ID + TO + UO, selective'}
@@ -173,7 +199,12 @@ def write_summary(out, ds, res, boot, n_layers):
              '(T0, T2: item text), user-origin = odd item layers (T1, T3: free user table).\n',
              '| config | weights (ID, TO, UO / full) | valid R@20 | test R@20 | test N@20 | vs F0 |',
              '|---|---|---|---|---|---|']
-    for k in ('F0', 'T_full', 'T_TO', 'T_UO', 'F1', 'F2', 'F3', 'F4'):
+    for name in extra:
+        label['T_' + name] = 'Text teacher layer_mode={} alone'.format(name)
+        label['G_' + name] = 'SF(ID, Text teacher layer_mode={})'.format(name)
+    keys = ['F0', 'T_full', 'T_TO', 'T_UO', 'F1', 'F2', 'F3', 'F4'] + \
+        [k for name in extra for k in ('T_' + name, 'G_' + name)]
+    for k in keys:
         r = res[k]
         lines.append('| {} {} | {} | {:.4f} | {:.4f} | {:.4f} | {:+.1f}% |'.format(
             k, label[k], ', '.join('{}={:.2f}'.format(a, b) for a, b in r['w'].items()), r['valid']['recall@20'],

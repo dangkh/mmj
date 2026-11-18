@@ -1,0 +1,58 @@
+#!/bin/bash
+#PBS -N teacher_to
+#PBS -q small_gpuq
+#PBS -l select=1:ncpus=8:ngpus=1:mem=16gb
+#PBS -l walltime=48:00:00
+#PBS -j oe
+#
+# Text teacher that outputs only the text-origin pathway (LightGCNC layer_mode, src/models/lightgcnc.py):
+#   to    items = mean of the even layers (T0, T2: item text and co-interacted items' text); users = all layers
+#   pure  items = even layers, users = odd layers: the score uses no free user table at all
+# For each mode in MODES, sequentially (finished steps are skipped):
+#   text_<mode>_grid        n_layers {1,2,3} x reg_weight {1e-2..1e-5}, seed 999
+#   text_<mode>_grid_s3     selected setting, seeds 1 and 2 (teacher alone, for its mean / sd)
+#   teacher_text_<mode>     selected setting, seed 999, with taps -> taps/LightGCNC-<DS>-teacher_text_<mode>
+# Then tools/path_fusion.py --teachers "<modes with taps>": SF(ID, new teacher) next to F0-F4 of the
+# usual Text teacher (needs taps teacher_id and teacher_text_layers, i.e. scripts/text_graph_probe.pbs).
+#
+#   qsub -v DS=baby scripts/teacher_to.pbs                 # MODES="to"
+#   qsub -v DS=baby,MODES=pure scripts/teacher_to.pbs      # separate job; the last one to finish has both
+#   cat results/path_fusion/baby/summary.md
+
+cd "$PBS_O_WORKDIR" || exit 1
+source "$HOME/miniconda3/etc/profile.d/conda.sh"
+conda activate "${CONDA_ENV:-Astar}"
+[ -n "${DS:-}" ] || { echo "DS not set"; exit 1; }
+MODES=${MODES:-to}
+echo "Job $PBS_JOBID on $(hostname), dataset $DS, modes $MODES, $(date '+%F %T')"
+nvidia-smi
+
+done_run() { python tools/best_params.py LightGCNC "$DS" "$1" > /dev/null 2>&1; }
+
+run() {   # run EXP_NAME ARGS...
+    local NAME=$1; shift
+    if done_run "$NAME"; then echo "[skip] $NAME finished"; return 0; fi
+    echo "===== [$(date '+%F %T')] $NAME: $* ====="
+    (cd src && python -u main.py -m LightGCNC -d "$DS" --exp_name="$NAME" "$@")
+}
+
+for M in $MODES; do
+    A="--item_input=text --layer_mode=$M"
+    # shellcheck disable=SC2086
+    run "text_${M}_grid" $A --seed=999
+    P=$(python tools/best_params.py LightGCNC "$DS" "text_${M}_grid") || { echo "no result for text_${M}_grid"; continue; }
+    echo "selected for $M: $P"
+    # shellcheck disable=SC2086
+    run "text_${M}_grid_s3" $A $P --seed="[1,2]"
+    if [ ! -f "taps/LightGCNC-${DS}-teacher_text_${M}/T3.npy" ]; then
+        # shellcheck disable=SC2086
+        run "teacher_text_${M}" $A $P --seed=999 --save_taps=True
+    fi
+done
+
+HAVE=""
+for M in to pure; do
+    [ -f "taps/LightGCNC-${DS}-teacher_text_${M}/T3.npy" ] && HAVE="$HAVE $M"
+done
+python -u tools/path_fusion.py -d "$DS" --teachers "$HAVE"
+echo "Done $(date '+%F %T')"
