@@ -1,0 +1,20 @@
+#!/bin/bash
+#PBS -N align_eval
+#PBS -q small_gpuq
+#PBS -l select=1:ncpus=8:ngpus=1:mem=16gb
+#PBS -l walltime=01:00:00
+#PBS -j oe
+#
+# tools/align_eval.py on GPU for one or more datasets (every taps/LightGCNAlign-<ds>-align_*; runs whose taps did
+# not change since the last evaluation are read from results/align/<ds>/cache).
+#   qsub -v DS="baby dbbook" scripts/align_eval.pbs
+#   cat results/align/baby/summary.md
+
+cd "$PBS_O_WORKDIR" || exit 1
+source "$HOME/miniconda3/etc/profile.d/conda.sh"
+conda activate "${CONDA_ENV:-Astar}"
+for D in ${DS:-baby dbbook}; do
+    echo "===== $D $(date '+%F %T')"
+    python -u tools/align_eval.py -d "$D" || exit 1
+done
+echo "Done $(date '+%F %T')"

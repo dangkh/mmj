@@ -35,7 +35,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'tools'))
 from probe_rec import load_data                          # noqa: E402
 from consolidate import binary, SF_GRID                  # noqa: E402
-from path_fusion import Scorer, rank                     # noqa: E402
+from path_fusion import Scorer                           # noqa: E402
 from jepay.metrics import paired_bootstrap               # noqa: E402
 
 
@@ -44,11 +44,13 @@ def load_run(path, ref=None):
         id_dir, t_dir = ref
         g = lambda d, f: np.load(os.path.join(d, f)).astype(np.float32)  # noqa: E731
         return {'U_id': g(id_dir, 'T3_user.npy'), 'Y_id': g(id_dir, 'T3.npy'),
-                'U_t': g(t_dir, 'T3_user.npy'), 'T': g(t_dir, 'T3.npy'), 'meta': {}}
+                'U_t': g(t_dir, 'T3_user.npy'), 'T': g(t_dir, 'T3.npy'), 'meta': {},
+                'files': [os.path.join(id_dir, 'T3.npy'), os.path.join(t_dir, 'T3.npy')]}
     g = lambda f: np.load(os.path.join(path, f)).astype(np.float32)  # noqa: E731
     meta = os.path.join(path, 'meta.json')
     out = {'U_id': g('T3_user.npy'), 'Y_id': g('T3.npy'), 'U_t': g('TT_user.npy'), 'T': g('TT.npy'),
-           'meta': json.load(open(meta)) if os.path.isfile(meta) else {}}
+           'meta': json.load(open(meta)) if os.path.isfile(meta) else {},
+           'files': [os.path.join(path, f) for f in ('T3.npy', 'TT.npy', 'TT_pred.npy')]}
     for k, f in (('P', 'TT_pred.npy'), ('P_u', 'TT_user_pred.npy')):
         if os.path.isfile(os.path.join(path, f)):
             out[k] = g(f)
@@ -98,6 +100,54 @@ def random_cos(Q, K, n, device, seed=0):
     return float((Qn * Kn).sum(1).mean())
 
 
+@torch.no_grad()
+def fast_rank(S, ws, hist, gt, mask, k=20, batch=2048):
+    """Recall@k / NDCG@k per user for several weightings at once (same users and definitions as
+    probe_knn.evaluate: users with history and ground truth; recall = hits / |gt|; NDCG with ideal DCG over
+    min(|gt|, k)). S: path_fusion.Scorer (z-normalised components); ws: list of {component: weight}.
+    Returns [(metrics, recall per user, ndcg per user)] in the order of ws."""
+    users = np.where((np.asarray(gt.sum(1)).ravel() > 0) & (np.asarray(hist.sum(1)).ravel() > 0))[0]
+    dev = S.dev
+    disc = 1.0 / torch.log2(torch.arange(2, k + 2, device=dev, dtype=torch.float32))
+    idcg = disc.cumsum(0)
+    keys = sorted({c for w in ws for c, a in w.items() if a != 0})
+    R, N = np.zeros((len(ws), len(users))), np.zeros((len(ws), len(users)))
+    gen = torch.Generator(device=dev)
+    gen.manual_seed(0)
+    gt, mask = gt.tocsr(), mask.tocsr()
+    for s in range(0, len(users), batch):
+        ub = users[s:s + batch]
+        u = torch.from_numpy(ub).long().to(dev)
+        comp = {}
+        for c in keys:
+            U, Y = S.comp[c]
+            m, sd = S.st[c]
+            comp[c] = (U[u] @ Y.T - m) / sd
+        n_items = next(iter(comp.values())).shape[1]
+        mb = mask[ub].tocoo()
+        mr, mc = torch.from_numpy(mb.row).long().to(dev), torch.from_numpy(mb.col).long().to(dev)
+        gb = gt[ub].tocoo()
+        G = torch.zeros(len(ub), n_items, dtype=torch.bool, device=dev)
+        G[torch.from_numpy(gb.row).long().to(dev), torch.from_numpy(gb.col).long().to(dev)] = True
+        cnt = G.sum(1).float()
+        best_dcg = idcg[(cnt.clamp(max=k) - 1).long()]
+        noise = 1e-6 * torch.rand(len(ub), n_items, generator=gen, device=dev)      # random tie-break
+        for wi, w in enumerate(ws):
+            sc = noise.clone()
+            for c, a in w.items():
+                if a != 0:
+                    sc += a * comp[c]
+            sc[mr, mc] = -float('inf')
+            hits = G.gather(1, sc.topk(k, dim=1).indices).float()
+            R[wi, s:s + len(ub)] = (hits.sum(1) / cnt).cpu().numpy()
+            N[wi, s:s + len(ub)] = ((hits * disc).sum(1) / best_dcg).cpu().numpy()
+    return [({'recall@20': float(R[i].mean()), 'ndcg@20': float(N[i].mean())}, R[i], N[i]) for i in range(len(ws))]
+
+
+def stamp(paths):
+    return [int(os.path.getmtime(p)) if os.path.isfile(p) else 0 for p in paths]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('-d', '--dataset', required=True)
@@ -106,6 +156,7 @@ def main():
     ap.add_argument('--out_dir', default=os.path.join(ROOT, 'results', 'align'))
     ap.add_argument('--n_users', type=int, default=5000, help='user sample for user matching')
     ap.add_argument('--n_boot', type=int, default=10000)
+    ap.add_argument('--no_cache', action='store_true', help='re-evaluate runs whose taps did not change')
     ap.add_argument('--cpu', action='store_true')
     args = ap.parse_args()
     device = torch.device('cuda' if torch.cuda.is_available() and not args.cpu else 'cpu')
@@ -138,20 +189,30 @@ def main():
     held = np.setdiff1d(np.arange(n_items), nce_items)
     users = np.sort(np.random.default_rng(0).choice(n_users, min(args.n_users, n_users), replace=False))
 
+    cache = os.path.join(out, 'cache')
+    os.makedirs(cache, exist_ok=True)
     res, per_user = {}, {}
     for name, R in runs.items():
+        cj, cn = os.path.join(cache, name + '.json'), os.path.join(cache, name + '_users.npz')
+        key = stamp(R['files'])
+        if not args.no_cache and os.path.isfile(cj) and os.path.isfile(cn) and json.load(open(cj)).get('_stamp') == key:
+            res[name] = json.load(open(cj))
+            z = np.load(cn)
+            for k in ('ID', 'Text', 'SF'):
+                per_user[(name, k)] = (z[k + '_r'], z[k + '_n'])
+            print('[align] {}: cached'.format(name), flush=True)
+            continue
         S = Scorer(R['U_id'], R['Y_id'], R['U_t'], {'T': R['T']}, device)
         r = {'hyper': R['meta'].get('hyper_parameters', {}), 'epoch': R['meta'].get('epoch')}
-        for k, w in (('ID', {'ID': 1.0}), ('Text', {'T': 1.0})):
-            va = rank(S, w, *sel)[0]
-            te, ru, nu = rank(S, w, *tst)
-            r[k] = {'valid': va, 'test': te}
-            per_user[(name, k)] = (ru, nu)
-        a = max(SF_GRID, key=lambda a: rank(S, {'ID': 1 - a, 'T': a}, *sel)[0]['recall@20'])
-        va = rank(S, {'ID': 1 - a, 'T': a}, *sel)[0]
-        te, ru, nu = rank(S, {'ID': 1 - a, 'T': a}, *tst)
-        r['SF'] = {'a': a, 'valid': va, 'test': te}
-        per_user[(name, 'SF')] = (ru, nu)
+        ws = [{'ID': 1.0}, {'T': 1.0}] + [{'ID': 1 - a, 'T': a} for a in SF_GRID]
+        va = fast_rank(S, ws, *sel)
+        a = SF_GRID[int(np.argmax([v[0]['recall@20'] for v in va[2:]]))]
+        te = fast_rank(S, [ws[0], ws[1], {'ID': 1 - a, 'T': a}], *tst)
+        for i, k in enumerate(('ID', 'Text')):
+            r[k] = {'valid': va[i][0], 'test': te[i][0]}
+            per_user[(name, k)] = te[i][1:]
+        r['SF'] = {'a': a, 'valid': va[2 + SF_GRID.index(a)][0], 'test': te[2][0]}
+        per_user[(name, 'SF')] = te[2][1:]
         r['match_item_nce'] = matching(R['T'], R['Y_id'], nce_items, device)
         r['match_item_held'] = matching(R['T'], R['Y_id'], held, device)
         r['cos_random_items'] = random_cos(R['T'], R['Y_id'], 20000, device)
@@ -166,7 +227,11 @@ def main():
         if 'P_u' in R:
             r['pred_user'] = matching(R['P_u'], R['U_id'], users, device)
             r['pred_r2_user'] = r2(R['P_u'], R['U_id'], users)
+        r['_stamp'] = key
         res[name] = r
+        json.dump(r, open(cj, 'w'), indent=1)
+        np.savez_compressed(cn, **{k + suf: per_user[(name, k)][j] for k in ('ID', 'Text', 'SF')
+                                   for j, suf in enumerate(('_r', '_n'))})
         print('[align] {}: ID {:.4f} | Text {:.4f} | SF {:.4f} (a {}) | item R@10 nce {:.3f} held {:.3f} | user R@10 '
               '{:.3f}'.format(name, r['ID']['test']['recall@20'], r['Text']['test']['recall@20'],
                               r['SF']['test']['recall@20'], a, r['match_item_nce']['R@10'],
