@@ -1,0 +1,40 @@
+#!/bin/bash
+#PBS -N sf_idid
+#PBS -q small_gpuq
+#PBS -l select=1:ncpus=8:ngpus=1:mem=16gb
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#
+# Ensemble control for score fusion: SF(ID, ID') with two independently trained ID teachers.
+#   1. ID teacher with seed 1 (best setting of id_grid, as teacher_id which uses seed 999), with taps
+#      -> taps/LightGCNC-<DS>-teacher_id_s1   (skipped if present)
+#   2. tools/path_fusion.py --teachers "teacher_id_s1 teacher_const_layers [EXTRA]":
+#      G_teacher_id_s1          = SF(ID, ID')      next to F1 = SF(ID, Text)
+#      G_teacher_const_layers   = SF(ID, const)    second model with graph + users only, no item content
+# Needs taps teacher_id, teacher_text_layers (scripts/text_graph_probe.pbs) and the log id_grid.
+#
+#   qsub -v DS=baby scripts/sf_idid.pbs
+#   cat results/path_fusion/baby/summary.md
+
+cd "$PBS_O_WORKDIR" || exit 1
+source "$HOME/miniconda3/etc/profile.d/conda.sh"
+conda activate "${CONDA_ENV:-Astar}"
+[ -n "${DS:-}" ] || { echo "DS not set"; exit 1; }
+echo "Job $PBS_JOBID on $(hostname), dataset $DS, $(date '+%F %T')"
+
+TAPS="taps/LightGCNC-${DS}-teacher_id_s1"
+if [ ! -f "$TAPS/T3.npy" ]; then
+    P=$(python tools/best_params.py LightGCNC "$DS" id_grid) || { echo "no finished id_grid log for $DS"; exit 1; }
+    echo "===== ID teacher seed 1: $P ====="
+    # shellcheck disable=SC2086
+    (cd src && python -u main.py -m LightGCNC -d "$DS" --item_input=id $P --seed=1 \
+        --save_taps=True --exp_name=teacher_id_s1) || exit 1
+fi
+
+T="teacher_id_s1"
+[ -f "taps/LightGCNC-${DS}-teacher_const_layers/T3.npy" ] && T="$T teacher_const_layers"
+for M in to pure; do                       # keep the TO-only teachers in the table if they exist
+    [ -f "taps/LightGCNC-${DS}-teacher_text_${M}/T3.npy" ] && T="$T $M"
+done
+python -u tools/path_fusion.py -d "$DS" --teachers "$T ${EXTRA:-}"
+echo "Done $(date '+%F %T')"

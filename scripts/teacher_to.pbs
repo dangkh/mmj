@@ -54,5 +54,8 @@ HAVE=""
 for M in to pure; do
     [ -f "taps/LightGCNC-${DS}-teacher_text_${M}/T3.npy" ] && HAVE="$HAVE $M"
 done
+for M in teacher_id_s1 teacher_const_layers; do      # controls of scripts/sf_idid.pbs, if present
+    [ -f "taps/LightGCNC-${DS}-${M}/T3.npy" ] && HAVE="$HAVE $M"
+done
 python -u tools/path_fusion.py -d "$DS" --teachers "$HAVE"
 echo "Done $(date '+%F %T')"

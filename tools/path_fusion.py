@@ -22,9 +22,10 @@ Weights chosen on valid R@20 (F1-F3: a in {0, 0.05, ..., 1}; F4: simplex step 0.
 reported on test (full catalog; valid masks train, test masks train + valid). Also each scorer alone.
 Paired bootstrap over test users (R@20, N@20): F2-F3, F2-F1, F3-F1, F4-F1, F1-F0, F2-F0, F3-F0.
 
-Extra text teachers (--teachers "to pure"): taps/LightGCNC-<ds>-teacher_text_<name>, e.g. a Text teacher trained
-with layer_mode=to (items = even layers only). For each: T_<name> alone and G_<name> = SF(ID, <name>), with
-bootstrap against F1, F2 and F0.
+Extra teachers (--teachers "to pure teacher_id_s1"): a bare name means taps/LightGCNC-<ds>-teacher_text_<name>
+(e.g. a Text teacher trained with layer_mode=to); a name starting with teacher_ is a taps folder as is (e.g.
+teacher_id_s1 = the ID teacher with seed 1: SF(ID, ID') is the ensemble control of SF(ID, Text)). For each:
+T_<name> alone and G_<name> = SF(ID, <name>), with bootstrap against F1, F2 and F0.
 
     python tools/path_fusion.py -d dbbook
     python tools/path_fusion.py -d dbbook --teachers "to pure"
@@ -129,7 +130,7 @@ def main():
     tst = (R_tr, R_te, binary(R_tr, R_va))
     extra = {}
     for name in args.teachers.split():
-        d = taps('teacher_text_' + name)
+        d = taps(name if name.startswith('teacher_') else 'teacher_text_' + name)
         if not os.path.isfile(os.path.join(d, 'T3.npy')):
             print('[fusion] no taps for teacher {} at {}: skipped'.format(name, d), flush=True)
             continue
@@ -200,8 +201,9 @@ def write_summary(out, ds, res, boot, n_layers, extra=()):
              '| config | weights (ID, TO, UO / full) | valid R@20 | test R@20 | test N@20 | vs F0 |',
              '|---|---|---|---|---|---|']
     for name in extra:
-        label['T_' + name] = 'Text teacher layer_mode={} alone'.format(name)
-        label['G_' + name] = 'SF(ID, Text teacher layer_mode={})'.format(name)
+        nm = name[len('teacher_'):] if name.startswith('teacher_') else 'Text teacher layer_mode=' + name
+        label['T_' + name] = '{} alone'.format(nm)
+        label['G_' + name] = 'SF(ID, {})'.format(nm)
     keys = ['F0', 'T_full', 'T_TO', 'T_UO', 'F1', 'F2', 'F3', 'F4'] + \
         [k for name in extra for k in ('T_' + name, 'G_' + name)]
     for k in keys:
