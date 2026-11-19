@@ -1,0 +1,184 @@
+# coding: utf-8
+"""
+Evaluation of LightGCNAlign runs (src/models/lightgcnalign.py): does InfoNCE learn ID-Text agreement, and does
+the agreement help ranking?
+
+For every run (taps/LightGCNAlign-<ds>-<exp>/ with T3, T3_user = ID branch; TT, TT_user = Text branch) and, as
+a reference, the separately trained teachers (taps/LightGCNC-<ds>-teacher_id + teacher_text_layers):
+  Ranking (full catalog; valid masks train, test masks train + valid), R@20 / N@20:
+    ID alone, Text alone, SF(ID, Text) = (1 - a) z(s_ID) + a z(s_T), a in {0, ..., 1} chosen on valid R@20
+  Matching (cosine between the Text and the ID representation, candidates = ALL items / users):
+    item Recall@1 / @10 of the same item for queries in
+        nce   items of the train part of data/<ds>/jepay_item_split.npz (the only items allowed in L_I)
+        held  the other items (never in L_I; still in BPR)
+    mean cosine of the same item and of random item pairs
+    user Recall@1 / @10 on a fixed sample of users (all users can enter L_U)
+  Paired bootstrap over test users against the first run (C0): Text alone and SF.
+
+    python tools/align_eval.py -d baby --runs "align_C0 align_C1 align_C2"
+Output: results/align/<ds>/{results.json, summary.md}
+"""
+import argparse
+import json
+import os
+import sys
+
+import numpy as np
+import torch
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, 'tools'))
+from probe_rec import load_data                          # noqa: E402
+from consolidate import binary, SF_GRID                  # noqa: E402
+from path_fusion import Scorer, rank                     # noqa: E402
+from jepay.metrics import paired_bootstrap               # noqa: E402
+
+
+def load_run(path, ref=None):
+    if ref is not None:                                   # separately trained teachers
+        id_dir, t_dir = ref
+        g = lambda d, f: np.load(os.path.join(d, f)).astype(np.float32)  # noqa: E731
+        return {'U_id': g(id_dir, 'T3_user.npy'), 'Y_id': g(id_dir, 'T3.npy'),
+                'U_t': g(t_dir, 'T3_user.npy'), 'T': g(t_dir, 'T3.npy'), 'meta': {}}
+    g = lambda f: np.load(os.path.join(path, f)).astype(np.float32)  # noqa: E731
+    meta = os.path.join(path, 'meta.json')
+    return {'U_id': g('T3_user.npy'), 'Y_id': g('T3.npy'), 'U_t': g('TT_user.npy'), 'T': g('TT.npy'),
+            'meta': json.load(open(meta)) if os.path.isfile(meta) else {}}
+
+
+@torch.no_grad()
+def matching(Q, K, queries, device, ks=(1, 10), chunk=2048):
+    """Rank of the true key K[q] for query Q[q] among all rows of K (cosine)."""
+    Qn = torch.nn.functional.normalize(torch.from_numpy(Q).to(device), dim=1)
+    Kn = torch.nn.functional.normalize(torch.from_numpy(K).to(device), dim=1)
+    ranks, same = [], []
+    for s in range(0, len(queries), chunk):
+        q = torch.from_numpy(queries[s:s + chunk]).long().to(device)
+        sims = Qn[q] @ Kn.T
+        true = sims.gather(1, q.view(-1, 1))
+        ranks.append((sims > true).sum(1).cpu().numpy())
+        same.append(true.view(-1).cpu().numpy())
+    r, c = np.concatenate(ranks), np.concatenate(same)
+    out = {'R@{}'.format(k): float((r < k).mean()) for k in ks}
+    out['cos_same'] = float(c.mean())
+    return out
+
+
+@torch.no_grad()
+def random_cos(Q, K, n, device, seed=0):
+    rng = np.random.default_rng(seed)
+    a, b = rng.integers(0, Q.shape[0], n), rng.integers(0, K.shape[0], n)
+    Qn = torch.nn.functional.normalize(torch.from_numpy(Q[a]).to(device), dim=1)
+    Kn = torch.nn.functional.normalize(torch.from_numpy(K[b]).to(device), dim=1)
+    return float((Qn * Kn).sum(1).mean())
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('-d', '--dataset', required=True)
+    ap.add_argument('--data_dir', default=os.path.join(ROOT, 'data'))
+    ap.add_argument('--runs', default='align_C0 align_C1 align_C2', help='exp names; the first is the reference')
+    ap.add_argument('--out_dir', default=os.path.join(ROOT, 'results', 'align'))
+    ap.add_argument('--n_users', type=int, default=5000, help='user sample for user matching')
+    ap.add_argument('--n_boot', type=int, default=10000)
+    ap.add_argument('--cpu', action='store_true')
+    args = ap.parse_args()
+    device = torch.device('cuda' if torch.cuda.is_available() and not args.cpu else 'cpu')
+    taps = lambda m, e: os.path.join(ROOT, 'taps', '{}-{}-{}'.format(m, args.dataset, e))  # noqa: E731
+    out = os.path.join(args.out_dir, args.dataset)
+    os.makedirs(out, exist_ok=True)
+
+    runs = {}
+    ref = (taps('LightGCNC', 'teacher_id'), taps('LightGCNC', 'teacher_text_layers'))
+    if all(os.path.isfile(os.path.join(d, 'T3.npy')) for d in ref):
+        runs['separate'] = load_run(None, ref)
+    for e in args.runs.split():
+        p = taps('LightGCNAlign', e)
+        if os.path.isfile(os.path.join(p, 'TT.npy')):
+            runs[e] = load_run(p)
+        else:
+            print('[align] no taps for {} at {}: skipped'.format(e, p), flush=True)
+    if not runs:
+        raise SystemExit('no runs')
+    n_items = next(iter(runs.values()))['Y_id'].shape[0]
+    (R_tr, R_va, R_te), n_users, _ = load_data(args.data_dir, args.dataset, min_items=n_items)
+    sel, tst = (R_tr, R_va, R_tr), (R_tr, R_te, binary(R_tr, R_va))
+    split = np.load(os.path.join(args.data_dir, args.dataset, 'jepay_item_split.npz'))
+    nce_items = np.sort(split['train'])
+    held = np.setdiff1d(np.arange(n_items), nce_items)
+    users = np.sort(np.random.default_rng(0).choice(n_users, min(args.n_users, n_users), replace=False))
+
+    res, per_user = {}, {}
+    for name, R in runs.items():
+        S = Scorer(R['U_id'], R['Y_id'], R['U_t'], {'T': R['T']}, device)
+        r = {'hyper': R['meta'].get('hyper_parameters', {}), 'epoch': R['meta'].get('epoch')}
+        for k, w in (('ID', {'ID': 1.0}), ('Text', {'T': 1.0})):
+            va = rank(S, w, *sel)[0]
+            te, ru, nu = rank(S, w, *tst)
+            r[k] = {'valid': va, 'test': te}
+            per_user[(name, k)] = (ru, nu)
+        a = max(SF_GRID, key=lambda a: rank(S, {'ID': 1 - a, 'T': a}, *sel)[0]['recall@20'])
+        va = rank(S, {'ID': 1 - a, 'T': a}, *sel)[0]
+        te, ru, nu = rank(S, {'ID': 1 - a, 'T': a}, *tst)
+        r['SF'] = {'a': a, 'valid': va, 'test': te}
+        per_user[(name, 'SF')] = (ru, nu)
+        r['match_item_nce'] = matching(R['T'], R['Y_id'], nce_items, device)
+        r['match_item_held'] = matching(R['T'], R['Y_id'], held, device)
+        r['cos_random_items'] = random_cos(R['T'], R['Y_id'], 20000, device)
+        r['match_user'] = matching(R['U_t'], R['U_id'], users, device)
+        r['cos_random_users'] = random_cos(R['U_t'], R['U_id'], 20000, device)
+        res[name] = r
+        print('[align] {}: ID {:.4f} | Text {:.4f} | SF {:.4f} (a {}) | item R@10 nce {:.3f} held {:.3f} | user R@10 '
+              '{:.3f}'.format(name, r['ID']['test']['recall@20'], r['Text']['test']['recall@20'],
+                              r['SF']['test']['recall@20'], a, r['match_item_nce']['R@10'],
+                              r['match_item_held']['R@10'], r['match_user']['R@10']), flush=True)
+
+    base = args.runs.split()[0]
+    boot = []
+    if base in res:
+        for name in res:
+            if name in (base, 'separate'):
+                continue
+            for k in ('Text', 'SF'):
+                for j, m in enumerate(('recall@20', 'ndcg@20')):
+                    bt = paired_bootstrap(per_user[(name, k)][j] - per_user[(base, k)][j], n_boot=args.n_boot)
+                    boot.append({'a': name, 'b': base, 'score': k, 'metric': m, **bt})
+    json.dump({'results': res, 'bootstrap': boot, 'n_items': n_items, 'n_nce_items': int(len(nce_items)),
+               'n_held_items': int(len(held))}, open(os.path.join(out, 'results.json'), 'w'), indent=1)
+    write_summary(out, args.dataset, res, boot, n_items, len(nce_items), len(held))
+
+
+def write_summary(out, ds, res, boot, n_items, n_nce, n_held):
+    L = ['# ID-Text alignment with InfoNCE ({})\n'.format(ds),
+         'separate = ID and Text teachers trained separately (LightGCNC teacher_id, teacher_text_layers). '
+         'Ranking: full catalog, test. Matching: cosine Text -> ID over all {} items (chance R@10 = {:.4f}); '
+         '"nce" = {} items allowed in L_I, "held" = {} items never in L_I.\n'.format(n_items, 10 / n_items, n_nce, n_held),
+         '## Ranking (test)\n',
+         '| run | setting | ID R@20 | ID N@20 | Text R@20 | Text N@20 | SF a | SF R@20 | SF N@20 |',
+         '|---|---|---|---|---|---|---|---|---|']
+    for n, r in res.items():
+        L.append('| {} | {} | {:.4f} | {:.4f} | {:.4f} | {:.4f} | {} | {:.4f} | {:.4f} |'.format(
+            n, ' '.join('{}={}'.format(k, v) for k, v in r['hyper'].items() if k != 'seed') or '-',
+            r['ID']['test']['recall@20'], r['ID']['test']['ndcg@20'], r['Text']['test']['recall@20'],
+            r['Text']['test']['ndcg@20'], r['SF']['a'], r['SF']['test']['recall@20'], r['SF']['test']['ndcg@20']))
+    L += ['\n## Matching (Text -> ID, cosine)\n',
+          '| run | item R@1 nce | item R@10 nce | item R@1 held | item R@10 held | cos same (nce / held) | '
+          'cos random | user R@1 | user R@10 | user cos same / random |', '|---|---|---|---|---|---|---|---|---|---|']
+    for n, r in res.items():
+        a, h, u = r['match_item_nce'], r['match_item_held'], r['match_user']
+        L.append('| {} | {:.4f} | {:.4f} | {:.4f} | {:.4f} | {:.3f} / {:.3f} | {:.3f} | {:.4f} | {:.4f} | {:.3f} / {:.3f} |'
+                 .format(n, a['R@1'], a['R@10'], h['R@1'], h['R@10'], a['cos_same'], h['cos_same'],
+                         r['cos_random_items'], u['R@1'], u['R@10'], u['cos_same'], r['cos_random_users']))
+    if boot:
+        L += ['\n## Paired bootstrap over test users (run - first run)\n',
+              '| run vs | score | metric | diff | 95% CI | p (one-sided, run > first) |', '|---|---|---|---|---|---|']
+        for b in boot:
+            L.append('| {} vs {} | {} | {} | {:+.4f} | [{:+.4f}, {:+.4f}] | {:.4f} |'.format(
+                b['a'], b['b'], b['score'], b['metric'], b['mean'], b['ci_lo'], b['ci_hi'], b['p_one_sided']))
+    text = '\n'.join(L) + '\n'
+    open(os.path.join(out, 'summary.md'), 'w').write(text)
+    print(text)
+
+
+if __name__ == '__main__':
+    main()

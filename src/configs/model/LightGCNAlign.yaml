@@ -1,0 +1,14 @@
+embedding_size: 64
+is_multimodal_model: True
+n_layers: 3
+reg_id: 1e-04            # best reg of the ID teacher (id_grid) on baby and dbbook
+reg_t: 1e-02             # best reg of the Text teacher (text_grid) on baby and dbbook
+proj_hidden: 256
+nce_weight: [0.0]        # C0: 0; C1 / C2: grid
+nce_tau: [0.2]
+nce_user: False          # C2: True (adds L_U)
+nce_sym: False           # True: also the ID -> Text direction
+nce_norm: True           # cosine similarity in L_I / L_U
+nce_holdout: True        # items outside the train part of jepay_item_split.npz never enter L_I
+eval_score: sum          # trainer ranking (selection): sum | id | text
+hyper_parameters: ["nce_weight", "nce_tau"]

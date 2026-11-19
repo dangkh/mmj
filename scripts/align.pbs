@@ -1,0 +1,61 @@
+#!/bin/bash
+#PBS -N align
+#PBS -q small_gpuq
+#PBS -l select=1:ncpus=8:ngpus=1:mem=16gb
+#PBS -l walltime=48:00:00
+#PBS -j oe
+#
+# ID + Text branches trained jointly with AlignRec-style InfoNCE (src/models/lightgcnalign.py), one dataset,
+# one config per job (CONFIG):
+#   C0   nce_weight = 0                               joint training, no alignment (one run)
+#   C1   L_I,        grid nce_weight x nce_tau        item agreement
+#   C2   L_I + L_U,  same grid                        item + user agreement
+# n_layers 3, d 64, reg_id 1e-4, reg_t 1e-2 (best regs of the separate teachers), seed 999. Model selection
+# (early stopping, grid) on valid R@20 of the summed score <U_id, Y_id> + <U_t, T_g>.
+# Steps (finished ones are skipped): align_<C>_grid, then the selected setting again with taps -> align_<C>,
+# then tools/align_eval.py on every align_C* that has taps -> results/align/<DS>/summary.md
+# Grid values: NCE_W (default "[0.01,0.1,0.5]"), NCE_TAU (default "[0.1,0.2]").
+#
+#   for C in C0 C1 C2; do qsub -v DS=baby,CONFIG=$C scripts/align.pbs; done
+#   cat results/align/baby/summary.md
+
+cd "$PBS_O_WORKDIR" || exit 1
+source "$HOME/miniconda3/etc/profile.d/conda.sh"
+conda activate "${CONDA_ENV:-Astar}"
+[ -n "${DS:-}" ] || { echo "DS not set"; exit 1; }
+CONFIG=${CONFIG:-C0}
+W=${NCE_W:-"[0.01,0.1,0.5]"}
+TAU=${NCE_TAU:-"[0.1,0.2]"}
+echo "Job $PBS_JOBID on $(hostname), dataset $DS, config $CONFIG, $(date '+%F %T')"
+nvidia-smi
+
+done_run() { python tools/best_params.py LightGCNAlign "$DS" "$1" > /dev/null 2>&1; }
+run() {   # run EXP_NAME ARGS...
+    local NAME=$1; shift
+    if done_run "$NAME"; then echo "[skip] $NAME finished"; return 0; fi
+    echo "===== [$(date '+%F %T')] $NAME: $* ====="
+    (cd src && python -u main.py -m LightGCNAlign -d "$DS" --exp_name="$NAME" "$@")
+}
+
+case "$CONFIG" in
+    C0) A="--nce_weight=0" ;;
+    C1) A="--nce_weight=$W --nce_tau=$TAU" ;;
+    C2) A="--nce_weight=$W --nce_tau=$TAU --nce_user=True" ;;
+    *) echo "unknown CONFIG $CONFIG"; exit 1 ;;
+esac
+
+TAPS="taps/LightGCNAlign-${DS}-align_${CONFIG}"
+if [ "$CONFIG" = "C0" ]; then
+    [ -f "$TAPS/TT.npy" ] || run "align_C0" $A --seed=999 --save_taps=True
+else
+    # shellcheck disable=SC2086
+    run "align_${CONFIG}_grid" $A --seed=999
+    P=$(python tools/best_params.py LightGCNAlign "$DS" "align_${CONFIG}_grid") || { echo "no result for align_${CONFIG}_grid"; exit 1; }
+    echo "selected for $CONFIG: $P"
+    EXTRA=""; [ "$CONFIG" = "C2" ] && EXTRA="--nce_user=True"
+    # shellcheck disable=SC2086
+    [ -f "$TAPS/TT.npy" ] || run "align_${CONFIG}" $P $EXTRA --seed=999 --save_taps=True
+fi
+
+python -u tools/align_eval.py -d "$DS" --runs "align_C0 align_C1 align_C2"
+echo "Done $(date '+%F %T')"

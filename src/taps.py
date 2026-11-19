@@ -103,6 +103,12 @@ def _lightgcnc(m):
     return out
 
 
+def _lightgcnalign(m):
+    """LightGCNAlign: ID branch (T3, T3_user) and Text branch (TT, TT_user), plus the text layer 0 (TT_l0)."""
+    U_id, Y_id, U_t, T_g, t0 = m.branches()
+    return {'T3': Y_id, 'T3_user': U_id, 'TT': T_g, 'TT_user': U_t, 'TT_l0': t0}
+
+
 ADAPTERS = {
     'DRAGON': _dragon,
     'DRAGONID': _dragon,   # visual branch = item-ID table (src/models/dragonid.py)
@@ -112,6 +118,7 @@ ADAPTERS = {
     'MGCN': _mgcn,
     'LIGHTGCN': _lightgcn,
     'LIGHTGCNC': _lightgcnc,  # LightGCN with content item embeddings (src/models/lightgcnc.py), per-layer items
+    'LIGHTGCNALIGN': _lightgcnalign,  # ID + Text branches with InfoNCE (src/models/lightgcnalign.py)
 }
 
 
