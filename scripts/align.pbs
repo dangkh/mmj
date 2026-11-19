@@ -5,18 +5,22 @@
 #PBS -l walltime=48:00:00
 #PBS -j oe
 #
-# ID + Text branches trained jointly with AlignRec-style InfoNCE (src/models/lightgcnalign.py), one dataset,
-# one config per job (CONFIG):
-#   C0   nce_weight = 0                               joint training, no alignment (one run)
-#   C1   L_I,        grid nce_weight x nce_tau        item agreement
-#   C2   L_I + L_U,  same grid                        item + user agreement
-# n_layers 3, d 64, reg_id 1e-4, reg_t 1e-2 (best regs of the separate teachers), seed 999. Model selection
-# (early stopping, grid) on valid R@20 of the summed score <U_id, Y_id> + <U_t, T_g>.
-# Steps (finished ones are skipped): align_<C>_grid, then the selected setting again with taps -> align_<C>,
-# then tools/align_eval.py on every align_C* that has taps -> results/align/<DS>/summary.md
-# Grid values: NCE_W (default "[0.01,0.1,0.5]"), NCE_TAU (default "[0.1,0.2]").
+# ID + Text branches with an alignment term (src/models/lightgcnalign.py), one dataset, one config per job:
+#   joint ID branch (both branches trained):
+#     C0   no alignment                                   (one run)
+#     C1   InfoNCE items             grid NCE_W  x NCE_TAU
+#     C2   InfoNCE items + users     grid NCE_W  x NCE_TAU
+#     JC1  JEPA items                grid JEPA_W           ||P(T^G_i) - sg(Y^ID_i)||^2
+#     JC2  JEPA items + users        grid JEPA_W
+#   frozen ID branch (= separately trained ID teacher, taps teacher_id; only the Text branch learns):
+#     F0   no alignment              FC1 / FC2  InfoNCE (grid NCE_WF, tau 0.2)    FJ1 / FJ2  JEPA (grid JEPA_W)
+# n_layers 3, d 64, reg_id 1e-4, reg_t 1e-2, seed 999. Selection (early stopping, grid) on valid R@20 of the
+# summed score <U_id, Y_id> + <U_t, T_g>.
+# Steps (finished ones are skipped): align_<CONFIG>_grid, the selected setting again with taps -> align_<CONFIG>,
+# then tools/align_eval.py on every align_* with taps -> results/align/<DS>/summary.md
+# Defaults: NCE_W "[0.01,0.1,0.5]", NCE_TAU "[0.1,0.2]", NCE_WF "[0.001,0.003,0.01,0.03]", JEPA_W "[0.01,0.1,1,10]".
 #
-#   for C in C0 C1 C2; do qsub -v DS=baby,CONFIG=$C scripts/align.pbs; done
+#   for C in F0 FC1 FC2 FJ1 FJ2 JC1 JC2; do qsub -v DS=baby,CONFIG=$C scripts/align.pbs; done
 #   cat results/align/baby/summary.md
 
 cd "$PBS_O_WORKDIR" || exit 1
@@ -26,6 +30,8 @@ conda activate "${CONDA_ENV:-Astar}"
 CONFIG=${CONFIG:-C0}
 W=${NCE_W:-"[0.01,0.1,0.5]"}
 TAU=${NCE_TAU:-"[0.1,0.2]"}
+WF=${NCE_WF:-"[0.001,0.003,0.01,0.03]"}
+WJ=${JEPA_W:-"[0.01,0.1,1,10]"}
 echo "Job $PBS_JOBID on $(hostname), dataset $DS, config $CONFIG, $(date '+%F %T')"
 nvidia-smi
 
@@ -37,25 +43,36 @@ run() {   # run EXP_NAME ARGS...
     (cd src && python -u main.py -m LightGCNAlign -d "$DS" --exp_name="$NAME" "$@")
 }
 
-case "$CONFIG" in
-    C0) A="--nce_weight=0" ;;
-    C1) A="--nce_weight=$W --nce_tau=$TAU" ;;
-    C2) A="--nce_weight=$W --nce_tau=$TAU --nce_user=True" ;;
+FR="--freeze_id=True"; JE="--align_loss=jepa"; US="--nce_user=True"
+case "$CONFIG" in          # GRID: values searched; FLAGS: fixed options (also used for the taps run)
+    C0)  GRID="--nce_weight=0";                     FLAGS="" ;;
+    C1)  GRID="--nce_weight=$W --nce_tau=$TAU";     FLAGS="" ;;
+    C2)  GRID="--nce_weight=$W --nce_tau=$TAU";     FLAGS="$US" ;;
+    JC1) GRID="--nce_weight=$WJ";                   FLAGS="$JE" ;;
+    JC2) GRID="--nce_weight=$WJ";                   FLAGS="$JE $US" ;;
+    F0)  GRID="--nce_weight=0";                     FLAGS="$FR" ;;
+    FC1) GRID="--nce_weight=$WF --nce_tau=0.2";     FLAGS="$FR" ;;
+    FC2) GRID="--nce_weight=$WF --nce_tau=0.2";     FLAGS="$FR $US" ;;
+    FJ1) GRID="--nce_weight=$WJ";                   FLAGS="$FR $JE" ;;
+    FJ2) GRID="--nce_weight=$WJ";                   FLAGS="$FR $JE $US" ;;
     *) echo "unknown CONFIG $CONFIG"; exit 1 ;;
 esac
-
-TAPS="taps/LightGCNAlign-${DS}-align_${CONFIG}"
-if [ "$CONFIG" = "C0" ]; then
-    [ -f "$TAPS/TT.npy" ] || run "align_C0" $A --seed=999 --save_taps=True
-else
-    # shellcheck disable=SC2086
-    run "align_${CONFIG}_grid" $A --seed=999
-    P=$(python tools/best_params.py LightGCNAlign "$DS" "align_${CONFIG}_grid") || { echo "no result for align_${CONFIG}_grid"; exit 1; }
-    echo "selected for $CONFIG: $P"
-    EXTRA=""; [ "$CONFIG" = "C2" ] && EXTRA="--nce_user=True"
-    # shellcheck disable=SC2086
-    [ -f "$TAPS/TT.npy" ] || run "align_${CONFIG}" $P $EXTRA --seed=999 --save_taps=True
+if [ "$FLAGS" != "${FLAGS/$FR/}" ] && [ ! -f "taps/LightGCNC-${DS}-teacher_id/T3.npy" ]; then
+    echo "frozen ID branch needs taps/LightGCNC-${DS}-teacher_id"; exit 1
 fi
 
-python -u tools/align_eval.py -d "$DS" --runs "align_C0 align_C1 align_C2"
+TAPS="taps/LightGCNAlign-${DS}-align_${CONFIG}"
+if [ "$CONFIG" = "C0" ] || [ "$CONFIG" = "F0" ]; then
+    # shellcheck disable=SC2086
+    [ -f "$TAPS/TT.npy" ] || run "align_${CONFIG}" $GRID $FLAGS --seed=999 --save_taps=True
+else
+    # shellcheck disable=SC2086
+    run "align_${CONFIG}_grid" $GRID $FLAGS --seed=999
+    P=$(python tools/best_params.py LightGCNAlign "$DS" "align_${CONFIG}_grid") || { echo "no result for align_${CONFIG}_grid"; exit 1; }
+    echo "selected for $CONFIG: $P"
+    # shellcheck disable=SC2086
+    [ -f "$TAPS/TT.npy" ] || run "align_${CONFIG}" $P $FLAGS --seed=999 --save_taps=True
+fi
+
+python -u tools/align_eval.py -d "$DS"
 echo "Done $(date '+%F %T')"

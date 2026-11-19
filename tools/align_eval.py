@@ -13,8 +13,13 @@ a reference, the separately trained teachers (taps/LightGCNC-<ds>-teacher_id + t
         held  the other items (never in L_I; still in BPR)
     mean cosine of the same item and of random item pairs
     user Recall@1 / @10 on a fixed sample of users (all users can enter L_U)
-  Paired bootstrap over test users against the first run (C0): Text alone and SF.
+  JEPA runs (taps TT_pred = P(T^G), TT_user_pred = P_u(U^T)): the same matching in the predicted ID space
+    (P(T) -> Y^ID), R^2 of P(T) for Y^ID on nce / held items; raw Text -> ID matching is reported separately.
+  Effective rank of T^G (collapse check).
+  Paired bootstrap over test users (Text alone and SF) against the baseline of the same family: runs with a
+    frozen ID branch (align_F*) against align_F0, the others against align_C0.
 
+    python tools/align_eval.py -d baby                    # every taps/LightGCNAlign-<ds>-align_* folder
     python tools/align_eval.py -d baby --runs "align_C0 align_C1 align_C2"
 Output: results/align/<ds>/{results.json, summary.md}
 """
@@ -42,8 +47,28 @@ def load_run(path, ref=None):
                 'U_t': g(t_dir, 'T3_user.npy'), 'T': g(t_dir, 'T3.npy'), 'meta': {}}
     g = lambda f: np.load(os.path.join(path, f)).astype(np.float32)  # noqa: E731
     meta = os.path.join(path, 'meta.json')
-    return {'U_id': g('T3_user.npy'), 'Y_id': g('T3.npy'), 'U_t': g('TT_user.npy'), 'T': g('TT.npy'),
-            'meta': json.load(open(meta)) if os.path.isfile(meta) else {}}
+    out = {'U_id': g('T3_user.npy'), 'Y_id': g('T3.npy'), 'U_t': g('TT_user.npy'), 'T': g('TT.npy'),
+           'meta': json.load(open(meta)) if os.path.isfile(meta) else {}}
+    for k, f in (('P', 'TT_pred.npy'), ('P_u', 'TT_user_pred.npy')):
+        if os.path.isfile(os.path.join(path, f)):
+            out[k] = g(f)
+    return out
+
+
+def r2(P, Y, idx):
+    res = ((P[idx] - Y[idx]) ** 2).sum()
+    return float(1.0 - res / max(((Y[idx] - Y[idx].mean(0)) ** 2).sum(), 1e-12))
+
+
+def erank(Z):
+    s = np.linalg.svd((Z - Z.mean(0)).astype(np.float64), compute_uv=False)
+    p = s / max(s.sum(), 1e-12)
+    p = p[p > 0]
+    return float(np.exp(-(p * np.log(p)).sum()))
+
+
+def baseline_of(name):
+    return 'align_F0' if name.startswith('align_F') else 'align_C0'
 
 
 @torch.no_grad()
@@ -77,7 +102,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('-d', '--dataset', required=True)
     ap.add_argument('--data_dir', default=os.path.join(ROOT, 'data'))
-    ap.add_argument('--runs', default='align_C0 align_C1 align_C2', help='exp names; the first is the reference')
+    ap.add_argument('--runs', default='auto', help='exp names, or auto = every taps/LightGCNAlign-<ds>-align_*')
     ap.add_argument('--out_dir', default=os.path.join(ROOT, 'results', 'align'))
     ap.add_argument('--n_users', type=int, default=5000, help='user sample for user matching')
     ap.add_argument('--n_boot', type=int, default=10000)
@@ -92,6 +117,11 @@ def main():
     ref = (taps('LightGCNC', 'teacher_id'), taps('LightGCNC', 'teacher_text_layers'))
     if all(os.path.isfile(os.path.join(d, 'T3.npy')) for d in ref):
         runs['separate'] = load_run(None, ref)
+    if args.runs == 'auto':
+        pre = 'LightGCNAlign-{}-'.format(args.dataset)
+        names = sorted(d[len(pre):] for d in os.listdir(os.path.join(ROOT, 'taps')) if d.startswith(pre + 'align_'))
+        order = lambda n: (0 if n.startswith('align_C') else 1, n)  # noqa: E731
+        args.runs = ' '.join(sorted(names, key=order))
     for e in args.runs.split():
         p = taps('LightGCNAlign', e)
         if os.path.isfile(os.path.join(p, 'TT.npy')):
@@ -127,29 +157,37 @@ def main():
         r['cos_random_items'] = random_cos(R['T'], R['Y_id'], 20000, device)
         r['match_user'] = matching(R['U_t'], R['U_id'], users, device)
         r['cos_random_users'] = random_cos(R['U_t'], R['U_id'], 20000, device)
+        r['erank_T'] = erank(R['T'])
+        if 'P' in R:
+            r['pred_item_nce'] = matching(R['P'], R['Y_id'], nce_items, device)
+            r['pred_item_held'] = matching(R['P'], R['Y_id'], held, device)
+            r['pred_r2_nce'], r['pred_r2_held'] = r2(R['P'], R['Y_id'], nce_items), r2(R['P'], R['Y_id'], held)
+            r['erank_P'] = erank(R['P'])
+        if 'P_u' in R:
+            r['pred_user'] = matching(R['P_u'], R['U_id'], users, device)
+            r['pred_r2_user'] = r2(R['P_u'], R['U_id'], users)
         res[name] = r
         print('[align] {}: ID {:.4f} | Text {:.4f} | SF {:.4f} (a {}) | item R@10 nce {:.3f} held {:.3f} | user R@10 '
               '{:.3f}'.format(name, r['ID']['test']['recall@20'], r['Text']['test']['recall@20'],
                               r['SF']['test']['recall@20'], a, r['match_item_nce']['R@10'],
                               r['match_item_held']['R@10'], r['match_user']['R@10']), flush=True)
 
-    base = args.runs.split()[0]
     boot = []
-    if base in res:
-        for name in res:
-            if name in (base, 'separate'):
-                continue
-            for k in ('Text', 'SF'):
-                for j, m in enumerate(('recall@20', 'ndcg@20')):
-                    bt = paired_bootstrap(per_user[(name, k)][j] - per_user[(base, k)][j], n_boot=args.n_boot)
-                    boot.append({'a': name, 'b': base, 'score': k, 'metric': m, **bt})
+    for name in res:
+        base = baseline_of(name)
+        if name in (base, 'separate') or base not in res:
+            continue
+        for k in ('Text', 'SF'):
+            for j, m in enumerate(('recall@20', 'ndcg@20')):
+                bt = paired_bootstrap(per_user[(name, k)][j] - per_user[(base, k)][j], n_boot=args.n_boot)
+                boot.append({'a': name, 'b': base, 'score': k, 'metric': m, **bt})
     json.dump({'results': res, 'bootstrap': boot, 'n_items': n_items, 'n_nce_items': int(len(nce_items)),
                'n_held_items': int(len(held))}, open(os.path.join(out, 'results.json'), 'w'), indent=1)
     write_summary(out, args.dataset, res, boot, n_items, len(nce_items), len(held))
 
 
 def write_summary(out, ds, res, boot, n_items, n_nce, n_held):
-    L = ['# ID-Text alignment with InfoNCE ({})\n'.format(ds),
+    L = ['# ID-Text alignment: InfoNCE and JEPA ({})\n'.format(ds),
          'separate = ID and Text teachers trained separately (LightGCNC teacher_id, teacher_text_layers). '
          'Ranking: full catalog, test. Matching: cosine Text -> ID over all {} items (chance R@10 = {:.4f}); '
          '"nce" = {} items allowed in L_I, "held" = {} items never in L_I.\n'.format(n_items, 10 / n_items, n_nce, n_held),
@@ -161,17 +199,30 @@ def write_summary(out, ds, res, boot, n_items, n_nce, n_held):
             n, ' '.join('{}={}'.format(k, v) for k, v in r['hyper'].items() if k != 'seed') or '-',
             r['ID']['test']['recall@20'], r['ID']['test']['ndcg@20'], r['Text']['test']['recall@20'],
             r['Text']['test']['ndcg@20'], r['SF']['a'], r['SF']['test']['recall@20'], r['SF']['test']['ndcg@20']))
-    L += ['\n## Matching (Text -> ID, cosine)\n',
+    L += ['\n## Raw matching (Text -> ID, cosine)\n',
           '| run | item R@1 nce | item R@10 nce | item R@1 held | item R@10 held | cos same (nce / held) | '
-          'cos random | user R@1 | user R@10 | user cos same / random |', '|---|---|---|---|---|---|---|---|---|---|']
+          'cos random | user R@1 | user R@10 | user cos same / random | erank T^G |',
+          '|---|---|---|---|---|---|---|---|---|---|---|']
     for n, r in res.items():
         a, h, u = r['match_item_nce'], r['match_item_held'], r['match_user']
-        L.append('| {} | {:.4f} | {:.4f} | {:.4f} | {:.4f} | {:.3f} / {:.3f} | {:.3f} | {:.4f} | {:.4f} | {:.3f} / {:.3f} |'
-                 .format(n, a['R@1'], a['R@10'], h['R@1'], h['R@10'], a['cos_same'], h['cos_same'],
-                         r['cos_random_items'], u['R@1'], u['R@10'], u['cos_same'], r['cos_random_users']))
+        L.append('| {} | {:.4f} | {:.4f} | {:.4f} | {:.4f} | {:.3f} / {:.3f} | {:.3f} | {:.4f} | {:.4f} | {:.3f} / {:.3f} | '
+                 '{:.1f} |'.format(n, a['R@1'], a['R@10'], h['R@1'], h['R@10'], a['cos_same'], h['cos_same'],
+                                   r['cos_random_items'], u['R@1'], u['R@10'], u['cos_same'], r['cos_random_users'],
+                                   r['erank_T']))
+    jr = {n: r for n, r in res.items() if 'pred_item_nce' in r}
+    if jr:
+        L += ['\n## JEPA: predicted ID space (P(T^G) -> Y^ID, cosine matching; R^2 of P(T^G) for Y^ID)\n',
+              '| run | item R@1 nce | item R@10 nce | item R@1 held | item R@10 held | R^2 nce | R^2 held | '
+              'erank P(T) | user R@1 | user R@10 | user R^2 |', '|---|---|---|---|---|---|---|---|---|---|---|']
+        for n, r in jr.items():
+            a, h, u = r['pred_item_nce'], r['pred_item_held'], r.get('pred_user')
+            L.append('| {} | {:.4f} | {:.4f} | {:.4f} | {:.4f} | {:.4f} | {:.4f} | {:.1f} | {} | {} | {} |'.format(
+                n, a['R@1'], a['R@10'], h['R@1'], h['R@10'], r['pred_r2_nce'], r['pred_r2_held'], r['erank_P'],
+                '{:.4f}'.format(u['R@1']) if u else '-', '{:.4f}'.format(u['R@10']) if u else '-',
+                '{:.4f}'.format(r['pred_r2_user']) if u else '-'))
     if boot:
-        L += ['\n## Paired bootstrap over test users (run - first run)\n',
-              '| run vs | score | metric | diff | 95% CI | p (one-sided, run > first) |', '|---|---|---|---|---|---|']
+        L += ['\n## Paired bootstrap over test users (run - baseline: align_F0 for frozen-ID runs, else align_C0)\n',
+              '| run vs | score | metric | diff | 95% CI | p (one-sided, run > baseline) |', '|---|---|---|---|---|---|']
         for b in boot:
             L.append('| {} vs {} | {} | {} | {:+.4f} | [{:+.4f}, {:+.4f}] | {:.4f} |'.format(
                 b['a'], b['b'], b['score'], b['metric'], b['mean'], b['ci_lo'], b['ci_hi'], b['p_one_sided']))

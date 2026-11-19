@@ -10,5 +10,8 @@ nce_user: False          # C2: True (adds L_U)
 nce_sym: False           # True: also the ID -> Text direction
 nce_norm: True           # cosine similarity in L_I / L_U
 nce_holdout: True        # items outside the train part of jepay_item_split.npz never enter L_I
+align_loss: nce          # nce | jepa  (nce_weight = lambda of either)
+pred_hidden: 256         # JEPA predictors
+freeze_id: False         # True: fixed ID branch = ID teacher taps (id_taps)
 eval_score: sum          # trainer ranking (selection): sum | id | text
 hyper_parameters: ["nce_weight", "nce_tau"]

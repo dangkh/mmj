@@ -18,7 +18,15 @@ Loss (per batch of (u, i+, i-)):
         default), so ID-Text matching can be measured on items the alignment never saw.
     L_U the same over the unique users of the batch: s(U^T_u, U^ID_u).
     No stop-gradient: L_I / L_U update both branches.
-Configs: C0 nce_weight=0 (joint training, no alignment), C1 nce_weight>0, C2 nce_weight>0 and nce_user=True.
+JEPA alternative (align_loss=jepa), same weight nce_weight = lambda_J, same items / users:
+    L_I = mean_i || P(T^G_i) - sg(Y^ID_i) ||^2      L_U = mean_u || P_u(U^T_u) - sg(U^ID_u) ||^2  (nce_user)
+    P, P_u: 2-layer MLPs (64 -> pred_hidden -> 64). The target is detached: L_I / L_U update the predictors and
+    the Text branch (its MLP and, through propagation, its user table), never the ID branch.
+Frozen ID branch (freeze_id=True): U^ID, Y^ID are the final embeddings of the separately trained ID teacher
+    (id_taps, default ../taps/LightGCNC-<ds>-teacher_id: T3_user, T3), fixed buffers; no ID BPR / reg term.
+    Only the Text branch (and the predictors) learn, for InfoNCE as well as for JEPA.
+Configs: C0 nce_weight=0 (joint training, no alignment), C1 nce_weight>0, C2 nce_weight>0 and nce_user=True;
+    the same with align_loss=jepa (J-C1, J-C2) and / or freeze_id=True (scripts/align.pbs).
 Ranking used by the trainer (model selection / logged test): eval_score = sum (<U^ID, Y^ID> + <U^T, T^G>,
 i.e. the concatenated model), id, or text. ID alone, Text alone and SF(ID, Text) are computed afterwards from
 the taps (tools/align_eval.py).
@@ -54,17 +62,34 @@ class LightGCNAlign(LightGCN):
         self.nce_user = bool(config['nce_user'])
         self.nce_sym = bool(config['nce_sym'])
         self.nce_norm = config['nce_norm'] is None or bool(config['nce_norm'])
+        self.align_loss = config['align_loss'] or 'nce'
+        assert self.align_loss in ('nce', 'jepa')
+        self.freeze_id = bool(config['freeze_id'])
         self.eval_score = config['eval_score'] or 'sum'
         assert self.eval_score in ('sum', 'id', 'text')
         self.mf_loss = BPRLoss()
         self.reg_loss = EmbLoss()
 
         init = nn.init.xavier_uniform_
-        self.embedding_dict = nn.ParameterDict({
-            'user_id': nn.Parameter(init(torch.empty(self.n_users, d))),
-            'item_id': nn.Parameter(init(torch.empty(self.n_items, d))),
-            'user_t': nn.Parameter(init(torch.empty(self.n_users, d))),
-        })
+        params = {'user_t': nn.Parameter(init(torch.empty(self.n_users, d)))}
+        if self.freeze_id:
+            path = config['id_taps'] or os.path.join('../taps', 'LightGCNC-{}-teacher_id'.format(config['dataset']))
+            U = np.load(os.path.join(path, 'T3_user.npy')).astype(np.float32)
+            Y = np.load(os.path.join(path, 'T3.npy')).astype(np.float32)
+            assert U.shape == (self.n_users, d) and Y.shape == (self.n_items, d), 'ID teacher shapes {} {}'.format(
+                U.shape, Y.shape)
+            self.register_buffer('U_id_fixed', torch.from_numpy(U))
+            self.register_buffer('Y_id_fixed', torch.from_numpy(Y))
+            print('[LightGCNAlign] frozen ID branch from {}'.format(os.path.abspath(path)))
+        else:
+            params['user_id'] = nn.Parameter(init(torch.empty(self.n_users, d)))
+            params['item_id'] = nn.Parameter(init(torch.empty(self.n_items, d)))
+        self.embedding_dict = nn.ParameterDict(params)
+        if self.align_loss == 'jepa':
+            ph = config['pred_hidden'] or 256
+            self.pred_item = nn.Sequential(nn.Linear(d, ph), nn.LeakyReLU(), nn.Linear(ph, d))
+            self.pred_user = nn.Sequential(nn.Linear(d, ph), nn.LeakyReLU(), nn.Linear(ph, d)) \
+                if self.nce_user else None
         assert self.t_feat is not None, 'text_feat.npy not loaded'
         X = self._standardize(self.t_feat.detach())
         assert X.shape[0] == self.n_items, 'feature rows {} != items {}'.format(X.shape[0], self.n_items)
@@ -84,7 +109,7 @@ class LightGCNAlign(LightGCN):
             else:
                 print('[LightGCNAlign] {} not found: every item can enter L_I'.format(path))
         self.register_buffer('nce_item_ok', ok)
-        self._stats = {'L_I': [], 'L_U': []}
+        self._stats = {'L_I': [], 'L_U': [], 'relI': [], 'relU': []}
         self._grad = None
         self._check_grad = True
 
@@ -110,7 +135,10 @@ class LightGCNAlign(LightGCN):
     def branches(self):
         e = self.embedding_dict
         t0 = self.text_items0()
-        U_id, Y_id = self._propagate(e['user_id'], e['item_id'])
+        if self.freeze_id:
+            U_id, Y_id = self.U_id_fixed, self.Y_id_fixed
+        else:
+            U_id, Y_id = self._propagate(e['user_id'], e['item_id'])
         U_t, T_g = self._propagate(e['user_t'], t0)
         return U_id, Y_id, U_t, T_g, t0
 
@@ -133,31 +161,50 @@ class LightGCNAlign(LightGCN):
             loss = 0.5 * (loss + F.cross_entropy(logits.T, labels))
         return loss
 
+    def _jepa(self, pred, x, target, key):
+        """mean_i || P(x_i) - sg(target_i) ||^2 ; also logs it relative to E||target - mean||^2."""
+        tgt = target.detach()
+        l = ((pred(x) - tgt) ** 2).sum(1).mean()
+        with torch.no_grad():
+            var = ((tgt - tgt.mean(0, keepdim=True)) ** 2).sum(1).mean().clamp_min(1e-12)
+            self._stats[key].append(float(l / var))
+        return l
+
     def calculate_loss(self, interaction):
         user, pos, neg = interaction[0], interaction[1], interaction[2]
         e = self.embedding_dict
         U_id, Y_id, U_t, T_g, t0 = self.branches()
         u_id, u_t = U_id[user], U_t[user]
-        bpr_id = self.mf_loss((u_id * Y_id[pos]).sum(1), (u_id * Y_id[neg]).sum(1))
         bpr_t = self.mf_loss((u_t * T_g[pos]).sum(1), (u_t * T_g[neg]).sum(1))
-        reg = self.reg_id * self.reg_loss(e['user_id'][user], e['item_id'][pos], e['item_id'][neg]) + \
-            self.reg_t * self.reg_loss(e['user_t'][user], t0[pos], t0[neg])
-        loss = bpr_id + bpr_t + reg
+        reg = self.reg_t * self.reg_loss(e['user_t'][user], t0[pos], t0[neg])
+        loss = bpr_t + reg
+        if not self.freeze_id:
+            bpr_id = self.mf_loss((u_id * Y_id[pos]).sum(1), (u_id * Y_id[neg]).sum(1))
+            loss = loss + bpr_id + self.reg_id * self.reg_loss(e['user_id'][user], e['item_id'][pos], e['item_id'][neg])
         if self.nce_weight > 0:
             items = torch.unique(torch.cat([pos, neg]))
             items = items[self.nce_item_ok[items]]
-            l_i = self._nce(T_g[items], Y_id[items]) if items.numel() > 1 else T_g.sum() * 0.0
+            if self.align_loss == 'jepa':
+                l_i = self._jepa(self.pred_item, T_g[items], Y_id[items], 'relI')
+            else:
+                l_i = self._nce(T_g[items], Y_id[items]) if items.numel() > 1 else T_g.sum() * 0.0
             nce = l_i
             self._stats['L_I'].append(float(l_i))
             if self.nce_user:
                 users = torch.unique(user)
-                l_u = self._nce(U_t[users], U_id[users])
+                if self.align_loss == 'jepa':
+                    l_u = self._jepa(self.pred_user, U_t[users], U_id[users], 'relU')
+                else:
+                    l_u = self._nce(U_t[users], U_id[users])
                 nce = nce + l_u
                 self._stats['L_U'].append(float(l_u))
             if self._check_grad and self.training:
                 self._check_grad = False
-                params = {'text_mlp': list(self.item_proj.parameters()), 'user_t': [e['user_t']],
-                          'item_id': [e['item_id']], 'user_id': [e['user_id']]}
+                params = {'text_mlp': list(self.item_proj.parameters()), 'user_t': [e['user_t']]}
+                if not self.freeze_id:
+                    params.update({'item_id': [e['item_id']], 'user_id': [e['user_id']]})
+                if self.align_loss == 'jepa':
+                    params['pred_item'] = list(self.pred_item.parameters())
                 flat = [p for ps in params.values() for p in ps]
                 g = torch.autograd.grad(self.nce_weight * nce, flat, retain_graph=True, allow_unused=True)
                 it, self._grad = iter(g), {}
@@ -177,9 +224,13 @@ class LightGCNAlign(LightGCN):
         msg = 'L_I {:.4f}'.format(np.mean(self._stats['L_I'])) if self._stats['L_I'] else ''
         if self._stats['L_U']:
             msg += ' L_U {:.4f}'.format(np.mean(self._stats['L_U']))
+        if self._stats['relI']:
+            msg += ' | JEPA error / target variance: item {:.4f}'.format(np.mean(self._stats['relI']))
+        if self._stats['relU']:
+            msg += ' user {:.4f}'.format(np.mean(self._stats['relU']))
         if self._grad:
             msg += ' | grad of nce: ' + ' '.join('{} {:.2e}'.format(k, v) for k, v in self._grad.items())
-        self._stats = {'L_I': [], 'L_U': []}
+        self._stats = {'L_I': [], 'L_U': [], 'relI': [], 'relU': []}
         return msg
 
     def full_sort_predict(self, interaction):
