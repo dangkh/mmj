@@ -129,7 +129,7 @@ class SCOPEKD(GeneralRecommender):
         return torch.matmul(hu[interaction[0]], hi.t())
 
     @torch.no_grad()
-    def branches(self):
+    def branch_reps(self):
         zu, zi, _ = self.low()
         hu, hi = self.correct(zu, zi)
         return {'low': (hu, hi), 'full': (self.U_full, self.Y_full)}

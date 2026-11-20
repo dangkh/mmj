@@ -133,9 +133,9 @@ def _scopeid(m):
     if hasattr(m, '_compute'):
         u, i, _ = m._compute()
     else:                                     # SCOPEKD: the student is the low branch after correction
-        u, i = m.branches()['low']
+        u, i = m.branch_reps()['low']
     out = {'T3': i, 'T3_user': u}
-    for b, (ub, ib) in m.branches().items():
+    for b, (ub, ib) in m.branch_reps().items():
         out['T3_' + b], out['T3_user_' + b] = ib, ub
     return out
 
