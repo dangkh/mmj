@@ -1,0 +1,7 @@
+embedding_size: 64
+is_multimodal_model: False
+n_layers: 3
+reg_weight: 0.0          # DirectAU has no BPR; regularisation off by default
+gamma: 1.0
+use_neg_sampling: False
+hyper_parameters: ["gamma"]

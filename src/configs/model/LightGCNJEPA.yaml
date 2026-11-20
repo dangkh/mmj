@@ -1,0 +1,17 @@
+embedding_size: 64
+is_multimodal_model: False
+n_layers: 3              # backbone: set from the LightGCN (LightGCNC id) grid by the job scripts
+reg_weight: 1e-04
+mask_mode: uniform       # uniform | hub | tail | node
+mask_ratio: 0.1          # fraction of masked edges (node: fraction of items)
+mask_beta: 1.0           # hub / tail: p ~ deg(item)^(+-beta)
+target_type: agg         # agg: full-graph target | edge: other endpoint of a masked edge
+jepa_weight: 0.1         # lambda, scaled by 1 / mask_ratio
+jepa_scale: var          # var: error relative to the target's batch variance | none
+vic_weight: 0.0
+warmup: 5
+ema_tau_start: 0.99
+ema_tau_end: 0.999
+ema_anneal: 100
+pred_hidden: 128
+hyper_parameters: ["mask_mode", "mask_ratio", "jepa_weight", "target_type", "vic_weight"]

@@ -1,0 +1,56 @@
+#!/bin/bash
+#PBS -N e3_base
+#PBS -q small_gpuq
+#PBS -l select=1:ncpus=8:ngpus=1:mem=16gb
+#PBS -l walltime=48:00:00
+#PBS -j oe
+#
+# E3: ID-only baselines on one dataset, one group per job (GROUP), seed 999 grid then seeds 1, 2 of the setting
+# selected on valid. Same LightGCN backbone (n_layers, reg_weight of the LightGCNC id grid) for every method.
+#   base      LightGCN (seeds 999, 1, 2), XSimGCL (cl_weight 4 x eps 2), DirectAU (gamma 4), SelfCF (dropout 2 x reg 2)
+#   sgl_ed    SGL-ED: ssl_weight {0.01, 0.05, 0.1, 0.5} at drop 0.1, then drop {0.05, 0.15} at the best ssl_weight
+#   sgl_ndrw  SGL-ND and SGL-RW: ssl_weight {0.01, 0.05, 0.1, 0.5}, drop 0.1
+# Finished runs are skipped (resubmit safely). Taps: taps/<Model>-<DS>-e3_*/
+#   for G in base sgl_ed sgl_ndrw; do qsub -v DS=baby,GROUP=$G scripts/e3_baselines.pbs; done
+cd "$PBS_O_WORKDIR" || exit 1
+source "$HOME/miniconda3/etc/profile.d/conda.sh"
+conda activate "${CONDA_ENV:-Astar}"
+[ -n "${DS:-}" ] || { echo "DS not set"; exit 1; }
+GROUP=${GROUP:-base}
+echo "Job $PBS_JOBID on $(hostname), dataset $DS, group $GROUP, $(date '+%F %T')"
+source scripts/idssl_common.sh
+W="[0.01,0.05,0.1,0.5]"
+
+case "$GROUP" in
+  base)
+    # shellcheck disable=SC2086
+    run LightGCN e3_lgn $BB --seed="[999,1,2]"
+    # shellcheck disable=SC2086
+    run XSimGCL e3_xsim $BB --cl_weight="[0.01,0.05,0.1,0.2]" --eps="[0.1,0.2]" --seed=999
+    seeds XSimGCL e3_xsim_s3 e3_xsim
+    # shellcheck disable=SC2086
+    run DirectAU e3_dau $NL --gamma="[0.5,1,2,5]" --seed=999
+    P=$(best DirectAU e3_dau) && run DirectAU e3_dau_s3 $NL $P --seed="[1,2]"
+    # shellcheck disable=SC2086
+    run SELFCFED_LGN e3_selfcf $NL --dropout="[0.1,0.3]" --reg_weight="[0.001,0.0001]" --seed=999
+    P=$(best SELFCFED_LGN e3_selfcf) && run SELFCFED_LGN e3_selfcf_s3 $NL $P --seed="[1,2]"
+    ;;
+  sgl_ed)
+    # shellcheck disable=SC2086
+    run SGL e3_sgled $BB --sgl_type=ED --ssl_weight="$W" --drop_ratio=0.1 --seed=999
+    LAM=$(best SGL e3_sgled --key ssl_weight)
+    # shellcheck disable=SC2086
+    [ -n "$LAM" ] && run SGL e3_sgled_drop $BB --sgl_type=ED --ssl_weight="$LAM" --drop_ratio="[0.05,0.15]" --seed=999
+    seeds SGL e3_sgled_s3 e3_sgled e3_sgled_drop
+    ;;
+  sgl_ndrw)
+    for T in ND RW; do
+      L=$(echo "$T" | tr 'A-Z' 'a-z')
+      # shellcheck disable=SC2086
+      run SGL "e3_sgl$L" $BB --sgl_type=$T --ssl_weight="$W" --drop_ratio=0.1 --seed=999
+      seeds SGL "e3_sgl${L}_s3" "e3_sgl$L"
+    done
+    ;;
+  *) echo "unknown GROUP $GROUP"; exit 1 ;;
+esac
+echo "Done $(date '+%F %T')"

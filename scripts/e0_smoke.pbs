@@ -1,0 +1,53 @@
+#!/bin/bash
+#PBS -N e0_smoke
+#PBS -q small_gpuq
+#PBS -l select=1:ncpus=8:ngpus=1:mem=16gb
+#PBS -l walltime=01:00:00
+#PBS -j oe
+#
+# E0: unit tests of the masks (tools/test_masks.py) and a 2-epoch smoke run of every ID-only model, then
+# tools/geom_eval.py on the smoke taps. Logs: src/log/<Model>-<DS>-smoke_*.log; table: results/geom_smoke/<DS>.
+#   qsub -v DS=baby scripts/e0_smoke.pbs
+cd "$PBS_O_WORKDIR" || exit 1
+source "$HOME/miniconda3/etc/profile.d/conda.sh"
+conda activate "${CONDA_ENV:-Astar}"
+DS=${DS:-baby}
+echo "Job $PBS_JOBID on $(hostname), dataset $DS, $(date '+%F %T')"
+source scripts/idssl_common.sh
+
+python -u tools/test_masks.py -d "$DS" || echo "!!! mask tests FAILED"
+
+S="--epochs=2 --seed=999"
+J="--warmup=0 --jepa_weight=0.1"
+declare -a SPECS=(
+  "LightGCN smoke_lgn"
+  "LightGCNJEPA smoke_jepa_u $J --mask_mode=uniform --mask_ratio=0.1"
+  "LightGCNJEPA smoke_jepa_h $J --mask_mode=hub --mask_ratio=0.1"
+  "LightGCNJEPA smoke_jepa_t $J --mask_mode=tail --mask_ratio=0.1 --vic_weight=0.1"
+  "LightGCNJEPA smoke_jepa_n $J --mask_mode=node --mask_ratio=0.1"
+  "LightGCNJEPA smoke_jepa_e $J --mask_mode=uniform --mask_ratio=0.1 --target_type=edge"
+  "SGL smoke_sgl_ed --sgl_type=ED --ssl_weight=0.1"
+  "SGL smoke_sgl_nd --sgl_type=ND --ssl_weight=0.1"
+  "SGL smoke_sgl_rw --sgl_type=RW --ssl_weight=0.1"
+  "XSimGCL smoke_xsim --cl_weight=0.1 --eps=0.1"
+  "DirectAU smoke_dau --gamma=1"
+  "SELFCFED_LGN smoke_selfcf --dropout=0.1 --reg_weight=0.0001"
+)
+FAILED=""
+for spec in "${SPECS[@]}"; do
+  read -r M E A <<< "$spec"
+  if [ "$M" = "DirectAU" ] || [ "$M" = "SELFCFED_LGN" ]; then B="$NL"; else B="$BB"; fi
+  # shellcheck disable=SC2086
+  if ! (cd src && python -u main.py -m "$M" -d "$DS" --exp_name="$E" --save_taps=True $B $S $A); then FAILED="$FAILED $M:$E"; fi
+  LOG=$(ls -t src/log/"$M-$DS-$E"-*.log 2>/dev/null | head -1)
+  if [ -n "$LOG" ] && grep -q "Loss is nan" "$LOG"; then FAILED="$FAILED $M:$E(nan)"; fi
+  [ -n "$LOG" ] && grep -E "\[jepa\]|\[sgl|\[xsimgcl\]|\[taps\]" "$LOG" | tail -3
+done
+
+python -u tools/geom_eval.py -d "$DS" --out_dir results/geom_smoke --n_boot 200 --methods \
+"L0=LightGCN:smoke_lgn;JEPA-U=LightGCNJEPA:smoke_jepa_u;JEPA-H=LightGCNJEPA:smoke_jepa_h;JEPA-T=LightGCNJEPA:smoke_jepa_t;\
+JEPA-N=LightGCNJEPA:smoke_jepa_n;JEPA-edge=LightGCNJEPA:smoke_jepa_e;SGL-ED=SGL:smoke_sgl_ed;SGL-ND=SGL:smoke_sgl_nd;\
+SGL-RW=SGL:smoke_sgl_rw;XSimGCL=XSimGCL:smoke_xsim;DirectAU=DirectAU:smoke_dau;SelfCF=SELFCFED_LGN:smoke_selfcf" \
+  || FAILED="$FAILED geom_eval"
+if [ -n "$FAILED" ]; then echo "!!! SMOKE FAILED:$FAILED"; else echo "SMOKE OK"; fi
+echo "Done $(date '+%F %T')"

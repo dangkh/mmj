@@ -92,7 +92,20 @@ def _mgcn(m):
 
 def _lightgcn(m):
     u, i = m.forward()
-    return {'T3': i, 'T3_user': u}
+    out = {'T3': i, 'T3_user': u}
+    emb = getattr(m, 'embedding_dict', None)
+    if emb is not None and 'user_emb' in emb and 'item_emb' in emb:      # layer 0, for the over-smoothing probe
+        out['E0'], out['E0_user'] = emb['item_emb'], emb['user_emb']
+    return out
+
+
+def _selfcf(m):
+    """SELFCFED_LGN scores <P(u), i> + <u, P(i)> = <[P(u); u], [i; P(i)]>: T3 / T3_user are these concatenated
+    scoring vectors; the encoder embeddings (geometry) are G / G_user, layer 0 E0 / E0_user."""
+    u, i = m.online_encoder.get_embedding()
+    emb = m.online_encoder.embedding_dict
+    return {'T3': torch.cat([i, m.predictor(i)], 1), 'T3_user': torch.cat([m.predictor(u), u], 1),
+            'G': i, 'G_user': u, 'E0': emb['item_emb'], 'E0_user': emb['user_emb']}
 
 
 def _lightgcnc(m):
@@ -122,6 +135,11 @@ ADAPTERS = {
     'LATTICE': _lattice,
     'MGCN': _mgcn,
     'LIGHTGCN': _lightgcn,
+    'LIGHTGCNJEPA': _lightgcn,      # ID-ID JEPA on a masked graph (src/models/lightgcnjepa.py)
+    'SGL': _lightgcn,
+    'XSIMGCL': _lightgcn,
+    'DIRECTAU': _lightgcn,
+    'SELFCFED_LGN': _selfcf,
     'LIGHTGCNC': _lightgcnc,  # LightGCN with content item embeddings (src/models/lightgcnc.py), per-layer items
     'LIGHTGCNALIGN': _lightgcnalign,  # ID + Text branches with InfoNCE (src/models/lightgcnalign.py)
 }
