@@ -1,0 +1,16 @@
+# SCOPEKD: Low-view student with a selective preference correction guided by a frozen Full-view teacher
+# (src/models/scopekd.py). Teacher: taps of the SCOPEID full-branch run (scripts/scopeid.pbs, exp es_f).
+embedding_size: 64
+feat_embed_dim: 64
+is_multimodal_model: False
+train_batch_size: 2048
+learning_rate: 0.003
+low_high_ratio: 0.05
+teacher_taps: ~               # default ../taps/SCOPEID-<dataset>-es_f
+corr_hidden: 64
+corr_alpha_init: 0.1
+kd_weight: [0.1, 1.0]
+kd_delta: [0.5, 1.0]
+kd_tmargin: 0.0
+kd_wmode: hard                # hard | soft | star
+hyper_parameters: ["kd_wmode", "kd_weight", "kd_delta", "low_high_ratio"]

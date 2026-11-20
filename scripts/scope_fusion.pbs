@@ -1,0 +1,18 @@
+#!/bin/bash
+#PBS -N scope_fusion
+#PBS -q small_gpuq
+#PBS -l select=1:ncpus=8:ngpus=1:mem=16gb
+#PBS -l walltime=01:00:00
+#PBS -j oe
+#
+# SCOPE-ID branch analysis on the saved taps (scripts/scopeid.pbs first): each branch alone, the model (concatenation),
+# score fusion with the weight chosen on valid, per-user oracle of the two branches, per item-degree group;
+# low + full vs full + full. Output: results/scope_fusion/<DS>/summary.md
+#   qsub -v DS=dbbook scripts/scope_fusion.pbs
+cd "$PBS_O_WORKDIR" || exit 1
+source "$HOME/miniconda3/etc/profile.d/conda.sh"
+conda activate "${CONDA_ENV:-Astar}"
+[ -n "${DS:-}" ] || { echo "DS not set"; exit 1; }
+echo "Job $PBS_JOBID on $(hostname), dataset $DS, $(date '+%F %T')"
+python -u tools/scope_fusion.py -d "$DS" ${ARGS:-} || exit 1
+echo "Done $(date '+%F %T')"

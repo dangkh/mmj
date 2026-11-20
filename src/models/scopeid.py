@@ -18,7 +18,10 @@ Removed (needs text / LLM profiles):
 
 Config (src/configs/model/SCOPEID.yaml; is_multimodal_model False, the text file is read only for 'text'):
   scope_branches : 'lf' (low + full, default) | 'ff' (two full-graph branches) | 'f' | 'l'
-  scope_gate     : 'id' (gate without c_u) | 'none' (alpha = 1)   [only used with 'lf']
+  scope_gate     : 'id' (gate without c_u) | 'none' (alpha = 1) | 'alpha' (one learned scalar on the LOW branch)
+                   | 'alpha_u' (one learned scalar per user on the LOW branch)        [only used with 'lf']
+  scope_combine  : 'cat' (SCOPE: concatenation, score = a * s_low + s_full for the alpha gates)
+                   | 'sum' (z = z_full + a * z_low for users and items, then dot product)
   scope_item_graph: 'none' | 'text' (text kNN item-item graph, needs t_feat)
   low_high_ratio : share of top-degree items whose edges are dropped in the low view (SCOPE: 0.10)
 Run: scripts/scopeid.pbs. Taps (--save_taps=True): T3 / T3_user = concatenated scoring vectors, plus per-branch
@@ -44,6 +47,8 @@ class SCOPEID(GeneralRecommender):
         self.n_mm_layers = config['n_mm_layers'] if config['n_mm_layers'] else 1
         self.branches = config['scope_branches'] or 'lf'
         self.gate_mode = config['scope_gate'] or 'id'
+        self.combine = config['scope_combine'] or 'cat'
+        assert self.gate_mode in ('id', 'none', 'alpha', 'alpha_u') and self.combine in ('cat', 'sum')
         self.item_graph = config['scope_item_graph'] or 'none'
         self.high_ratio = config['low_high_ratio'] if config['low_high_ratio'] is not None else 0.10
         self.pref_reg = 0.003  # hard-coded in SCOPE
@@ -85,6 +90,12 @@ class SCOPEID(GeneralRecommender):
             self.out_proj = nn.Linear(2, 1)   # SCOPE: Linear(3, 1) over [userW, c_u, gate]
             self.userW = nn.Parameter(torch.empty(self.num_user, 1))
             nn.init.xavier_normal_(self.userW)
+        # learned weight of the LOW branch (baseline): one scalar, or one scalar per user; initialised at 1
+        self.low_alpha = None
+        if self.branches == 'lf' and self.gate_mode in ('alpha', 'alpha_u'):
+            n = self.num_user if self.gate_mode == 'alpha_u' else 1
+            self.low_alpha = nn.Parameter(torch.ones(n, 1))
+        assert self.combine == 'cat' or self.branches in ('lf', 'ff'), 'scope_combine=sum needs two branches'
 
         # ---- optional text kNN item-item graph (as in SCOPE) ----
         self.mm_adj = None
@@ -130,8 +141,17 @@ class SCOPEID(GeneralRecommender):
             a = torch.sigmoid(self.out_proj(torch.cat([self.userW, self.gate(g_in)], dim=1)))
             users['full'] = (0.5 + 0.5 * a) * users['full']
 
-        user_rep = torch.cat([users[b] for b in self.branch_names], dim=1)
-        item_rep = torch.cat([items[b] for b in self.branch_names], dim=1)
+        if self.low_alpha is not None:
+            users['low'] = self.low_alpha * users['low']
+            if self.combine == 'sum':
+                items['low'] = self.low_alpha.mean() * items['low'] if self.gate_mode == 'alpha_u' \
+                    else self.low_alpha * items['low']
+        if self.combine == 'sum':
+            user_rep = sum(users[b] for b in self.branch_names)
+            item_rep = sum(items[b] for b in self.branch_names)
+        else:
+            user_rep = torch.cat([users[b] for b in self.branch_names], dim=1)
+            item_rep = torch.cat([items[b] for b in self.branch_names], dim=1)
         if self.mm_adj is not None:
             item_rep = self._item_item(item_rep)
         return user_rep, item_rep, prefs

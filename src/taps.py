@@ -130,7 +130,10 @@ def _lightgcnalign(m):
 def _scopeid(m):
     """SCOPEID: concatenated scoring vectors (T3, T3_user, gate and text item-item graph applied) and the
     representation of every branch after propagation (T3_<branch>, T3_user_<branch>)."""
-    u, i, _ = m._compute()
+    if hasattr(m, '_compute'):
+        u, i, _ = m._compute()
+    else:                                     # SCOPEKD: the student is the low branch after correction
+        u, i = m.branches()['low']
     out = {'T3': i, 'T3_user': u}
     for b, (ub, ib) in m.branches().items():
         out['T3_' + b], out['T3_user_' + b] = ib, ub
@@ -152,7 +155,8 @@ ADAPTERS = {
     'SELFCFED_LGN': _selfcf,
     'LIGHTGCNC': _lightgcnc,  # LightGCN with content item embeddings (src/models/lightgcnc.py), per-layer items
     'LIGHTGCNALIGN': _lightgcnalign,  # ID + Text branches with InfoNCE (src/models/lightgcnalign.py)
-    'SCOPEID': _scopeid,  # ID-only SCOPE: low-exposure + full graph branches (src/models/scopeid.py)
+    'SCOPEID': _scopeid,
+    'SCOPEKD': _scopeid,  # Low student + frozen Full teacher (src/models/scopekd.py): T3 = student, T3_full = teacher  # ID-only SCOPE: low-exposure + full graph branches (src/models/scopeid.py)
 }
 
 

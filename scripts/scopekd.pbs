@@ -1,0 +1,57 @@
+#!/bin/bash
+#PBS -N scopekd
+#PBS -q small_gpuq
+#PBS -l select=1:ncpus=8:ngpus=1:mem=16gb
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#
+# Selective preference correction (src/models/scopekd.py) and the learned-alpha baselines (src/models/scopeid.py).
+# Needs the frozen Full teacher: taps/SCOPEID-<DS>-es_f (scripts/scopeid.pbs). Low view r = RATIO (default 0.05).
+#   GROUP=kd     kd0 (no teacher: kd_weight 0) and kd_{hard,soft,star}, each a grid kd_weight {0.1, 1} x kd_delta {0.5, 1}
+#   GROUP=alpha  SCOPEID low + full with a learned weight on the low branch: lfa (cat, scalar), lfau (cat, per user),
+#                lfa_sum (z_full + a z_low)
+#   GROUP=all    both
+# Finished runs are skipped. Logs: src/log/{SCOPEKD,SCOPEID}-<DS>-es_*; taps: taps/{SCOPEKD,SCOPEID}-<DS>-es_*/
+#   qsub -v DS=dbbook,GROUP=kd scripts/scopekd.pbs
+#   qsub -v DS=dbbook,GROUP=alpha scripts/scopekd.pbs
+#   then: python tools/scope_fusion.py -d dbbook --model SCOPEKD --runs "kd0 kd_hard kd_soft kd_star" --cross "" \
+#             --out_dir results/scopekd_fusion
+cd "$PBS_O_WORKDIR" || exit 1
+source "$HOME/miniconda3/etc/profile.d/conda.sh"
+conda activate "${CONDA_ENV:-Astar}"
+[ -n "${DS:-}" ] || { echo "DS not set"; exit 1; }
+GROUP=${GROUP:-all}
+RATIO=${RATIO:-0.05}
+SEEDS=${SEEDS:-999}
+EXTRA=${EXTRA:-}
+TAGSFX=${TAGSFX:-}
+[ "$SEEDS" != "999" ] && TAGSFX="${TAGSFX}_s3"
+echo "Job $PBS_JOBID on $(hostname), dataset $DS, group $GROUP, ratio $RATIO, seeds $SEEDS, $(date '+%F %T')"
+[ -f "taps/SCOPEID-$DS-es_f/T3.npy" ] || { echo "teacher taps taps/SCOPEID-$DS-es_f missing (run scripts/scopeid.pbs)"; exit 1; }
+source scripts/idssl_common.sh
+
+kd() {
+    # shellcheck disable=SC2086
+    run SCOPEKD "es_kd0${TAGSFX}" --low_high_ratio=$RATIO --kd_weight=0.0 --kd_delta=0.5 --kd_wmode=hard --seed="$SEEDS" $EXTRA
+    for m in hard soft star; do
+        # shellcheck disable=SC2086
+        run SCOPEKD "es_kd_${m}${TAGSFX}" --low_high_ratio=$RATIO --kd_wmode=$m \
+            --kd_weight="[0.1,1.0]" --kd_delta="[0.5,1.0]" --seed="$SEEDS" $EXTRA
+    done
+}
+alpha() {
+    rt=r$(python -c "print('%02d' % round($RATIO*100))")
+    # shellcheck disable=SC2086
+    run SCOPEID "es_lfa_${rt}${TAGSFX}"     --scope_branches=lf --scope_gate=alpha   --scope_combine=cat --low_high_ratio=$RATIO --seed="$SEEDS" $EXTRA
+    # shellcheck disable=SC2086
+    run SCOPEID "es_lfau_${rt}${TAGSFX}"    --scope_branches=lf --scope_gate=alpha_u --scope_combine=cat --low_high_ratio=$RATIO --seed="$SEEDS" $EXTRA
+    # shellcheck disable=SC2086
+    run SCOPEID "es_lfa_sum_${rt}${TAGSFX}" --scope_branches=lf --scope_gate=alpha   --scope_combine=sum --low_high_ratio=$RATIO --seed="$SEEDS" $EXTRA
+}
+case "$GROUP" in
+  kd) kd ;;
+  alpha) alpha ;;
+  all) alpha; kd ;;
+  *) echo "unknown GROUP $GROUP"; exit 1 ;;
+esac
+echo "SCOPEKD done: $DS $GROUP ($(date '+%F %T'))"
