@@ -127,6 +127,16 @@ def _lightgcnalign(m):
     return out
 
 
+def _scopeid(m):
+    """SCOPEID: concatenated scoring vectors (T3, T3_user, gate and text item-item graph applied) and the
+    representation of every branch after propagation (T3_<branch>, T3_user_<branch>)."""
+    u, i, _ = m._compute()
+    out = {'T3': i, 'T3_user': u}
+    for b, (ub, ib) in m.branches().items():
+        out['T3_' + b], out['T3_user_' + b] = ib, ub
+    return out
+
+
 ADAPTERS = {
     'DRAGON': _dragon,
     'DRAGONID': _dragon,   # visual branch = item-ID table (src/models/dragonid.py)
@@ -142,6 +152,7 @@ ADAPTERS = {
     'SELFCFED_LGN': _selfcf,
     'LIGHTGCNC': _lightgcnc,  # LightGCN with content item embeddings (src/models/lightgcnc.py), per-layer items
     'LIGHTGCNALIGN': _lightgcnalign,  # ID + Text branches with InfoNCE (src/models/lightgcnalign.py)
+    'SCOPEID': _scopeid,  # ID-only SCOPE: low-exposure + full graph branches (src/models/scopeid.py)
 }
 
 

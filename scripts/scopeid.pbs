@@ -1,0 +1,50 @@
+#!/bin/bash
+#PBS -N scopeid
+#PBS -q small_gpuq
+#PBS -l select=1:ncpus=8:ngpus=1:mem=16gb
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#
+# SCOPE-ID (plan.md 4c): ID-only ablation of SCOPE (src/models/scopeid.py), one dataset per job, runs in sequence.
+#   f / ff            full-graph branch only / two full-graph branches (control: "two channels")
+#   l_rXX             low-exposure branch only (edges of the top XX% items by train degree dropped)
+#   lf1_rXX / lfg_rXX low + full, alpha = 1 / ID-only gate
+#   *_tg              + text kNN item-item graph on the concatenated item representation (as in SCOPE)
+# Hyper-parameters as in the SCOPE repo (lr 0.003, batch 2048); no LightGCN backbone override.
+# Finished runs are skipped (resubmit safely). Logs: src/log/SCOPEID-<DS>-es_<tag>-*.log, taps: taps/SCOPEID-<DS>-es_<tag>/
+#   qsub -v DS=baby scripts/scopeid.pbs
+#   qsub -v DS=baby,SEEDS="[1,2]",RATIOS=0.05 scripts/scopeid.pbs                       # more seeds, one ratio
+#   qsub -l walltime=01:00:00 -v DS=baby,RATIOS=0.05,EXTRA="--epochs=1",TAGSFX=_smoke scripts/scopeid.pbs
+cd "$PBS_O_WORKDIR" || exit 1
+source "$HOME/miniconda3/etc/profile.d/conda.sh"
+conda activate "${CONDA_ENV:-Astar}"
+[ -n "${DS:-}" ] || { echo "DS not set"; exit 1; }
+SEEDS=${SEEDS:-999}
+RATIOS=${RATIOS:-"0.03 0.05 0.10"}
+GRAPHS=${GRAPHS:-"none text"}
+EXTRA=${EXTRA:-}
+TAGSFX=${TAGSFX:-}
+[ "$SEEDS" != "999" ] && TAGSFX="${TAGSFX}_s3"     # other seeds: separate exp name (seed-999 runs stay skipped)
+echo "Job $PBS_JOBID on $(hostname), dataset $DS, seeds $SEEDS, ratios $RATIOS, graphs $GRAPHS, $(date '+%F %T')"
+source scripts/idssl_common.sh
+
+sc() {   # sc TAG ARGS...
+    local tag=$1; shift
+    # shellcheck disable=SC2086
+    run SCOPEID "es_${tag}${TAGSFX}" "$@" --seed="$SEEDS" $EXTRA
+}
+
+for g in $GRAPHS; do
+    sfx=""; [ "$g" = "text" ] && sfx="_tg"
+    sc "f$sfx"  --scope_branches=f  --scope_gate=none --scope_item_graph=$g
+    sc "ff$sfx" --scope_branches=ff --scope_gate=none --scope_item_graph=$g
+    for r in $RATIOS; do
+        rt=r$(python -c "print('%02d' % round($r*100))")
+        sc "lf1_${rt}${sfx}" --scope_branches=lf --scope_gate=none --scope_item_graph=$g --low_high_ratio=$r
+        sc "lfg_${rt}${sfx}" --scope_branches=lf --scope_gate=id   --scope_item_graph=$g --low_high_ratio=$r
+        if [ "$g" = "none" ]; then
+            sc "l_${rt}" --scope_branches=l --scope_gate=none --scope_item_graph=none --low_high_ratio=$r
+        fi
+    done
+done
+echo "SCOPEID done: $DS ($(date '+%F %T'))"
