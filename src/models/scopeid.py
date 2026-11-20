@@ -157,7 +157,7 @@ class SCOPEID(GeneralRecommender):
         return user_rep, item_rep, prefs
 
     @torch.no_grad()
-    def branches(self):
+    def branch_reps(self):
         """Per-branch user / item representations after propagation (for taps)."""
         out = {}
         for b in self.branch_names:

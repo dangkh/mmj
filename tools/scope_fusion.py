@@ -85,8 +85,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('-d', '--dataset', required=True)
     ap.add_argument('--data_dir', default=os.path.join(ROOT, 'data'))
-    ap.add_argument('--runs', default='lf1_r03 lf1_r05 lf1_r10 ff lf1_r03_tg lf1_r05_tg lf1_r10_tg ff_tg')
-    ap.add_argument('--cross', default='l_r03 l_r05 l_r10', help='SF(f, <run>) of independently trained runs')
+    ap.add_argument('--runs', nargs='+',
+                    default='lf1_r03 lf1_r05 lf1_r10 ff lf1_r03_tg lf1_r05_tg lf1_r10_tg ff_tg'.split())
+    ap.add_argument('--cross', nargs='*', default='l_r03 l_r05 l_r10'.split(),
+                    help='SF(f, <run>) of independently trained runs (give --cross with nothing to skip)')
     ap.add_argument('--out_dir', default=os.path.join(ROOT, 'results', 'scope_fusion'))
     ap.add_argument('--n_boot', type=int, default=10000)
     ap.add_argument('--model', default='SCOPEID', help='SCOPEID, or SCOPEKD (branches: student low, teacher full)')
@@ -99,7 +101,7 @@ def main():
     out = os.path.join(args.out_dir, ds)
     os.makedirs(out, exist_ok=True)
 
-    probe = taps_dir(ds, 'f', 'SCOPEID') or taps_dir(ds, args.runs.split()[0])
+    probe = taps_dir(ds, 'f', 'SCOPEID') or taps_dir(ds, args.runs[0])
     n_items = load(probe, 'T3').shape[0]
     (R_tr, R_va, R_te), n_users, n_items = load_data(args.data_dir, ds, min_items=n_items)
     sel = (R_tr, R_va, R_tr)
@@ -144,7 +146,7 @@ def main():
             name, res[name]['test_r20'], pick.mean()), flush=True)
 
     done = []
-    for exp in args.runs.split():
+    for exp in args.runs:
         d = taps_dir(ds, exp)
         if d is None:
             print('[scope] no taps for es_{}: skipped'.format(exp), flush=True)
@@ -170,7 +172,7 @@ def main():
     if fd is not None and args.cross:
         S.add('f', load(fd, 'T3_user'), load(fd, 'T3'))
         measure('f', {'f': 1.0}, z=False)
-        for c in args.cross.split():
+        for c in args.cross:
             d = taps_dir(ds, c, 'SCOPEID')
             if d is None:
                 continue

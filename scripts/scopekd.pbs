@@ -6,7 +6,8 @@
 #PBS -j oe
 #
 # Selective preference correction (src/models/scopekd.py) and the learned-alpha baselines (src/models/scopeid.py).
-# GROUP=kd needs the frozen Full teacher: taps/SCOPEID-<DS>-es_f (or TEACHER_TAPS=<dir>). Low view r = RATIO (0.05).
+# GROUP=kd uses the frozen Full teacher taps/SCOPEID-<DS>-es_f (or TEACHER_TAPS=<dir relative to the repo>); if missing,
+# it first trains it (SCOPEID single full branch, exp es_f_teacher, seed 999). Low view r = RATIO (default 0.05).
 #   GROUP=kd     kd0 (no teacher: kd_weight 0) and kd_{hard,soft,star}, each a grid kd_weight {0.1, 1} x kd_delta {0.5, 1}
 #   GROUP=alpha  SCOPEID low + full with a learned weight on the low branch: lfa (cat, scalar), lfau (cat, per user),
 #                lfa_sum (z_full + a z_low)
@@ -31,7 +32,13 @@ source scripts/idssl_common.sh
 
 kd() {
     T=${TEACHER_TAPS:-taps/SCOPEID-$DS-es_f}
-    [ -f "$T/T3.npy" ] || { echo "teacher taps $T/T3.npy missing: rerun the SCOPEID es_f run with --save_taps=True"; return 1; }
+    if [ ! -f "$T/T3.npy" ]; then      # no teacher taps: train the Full teacher here (single full branch, seed 999)
+        echo "teacher taps $T/T3.npy missing: training SCOPEID es_f_teacher"
+        run SCOPEID "es_f_teacher" --scope_branches=f --scope_gate=none --scope_item_graph=none --seed=999
+        T=taps/SCOPEID-$DS-es_f_teacher
+        [ -f "$T/T3.npy" ] || { echo "teacher taps still missing at $T"; return 1; }
+    fi
+    echo "teacher: $T"
     # shellcheck disable=SC2086
     run SCOPEKD "es_kd0${TAGSFX}" --teacher_taps="../$T" --low_high_ratio=$RATIO --kd_weight=0.0 --kd_delta=0.5 --kd_wmode=hard --seed="$SEEDS" $EXTRA
     for m in hard soft star; do
