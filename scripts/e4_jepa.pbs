@@ -1,6 +1,6 @@
 #!/bin/bash
 #PBS -N e4_jepa
-#PBS -q med_gpuq
+#PBS -q small_gpuq
 #PBS -l select=1:ncpus=8:ngpus=1:mem=16gb
 #PBS -l walltime=48:00:00
 #PBS -j oe
