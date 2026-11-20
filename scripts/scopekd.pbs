@@ -6,7 +6,7 @@
 #PBS -j oe
 #
 # Selective preference correction (src/models/scopekd.py) and the learned-alpha baselines (src/models/scopeid.py).
-# Needs the frozen Full teacher: taps/SCOPEID-<DS>-es_f (scripts/scopeid.pbs). Low view r = RATIO (default 0.05).
+# GROUP=kd needs the frozen Full teacher: taps/SCOPEID-<DS>-es_f (or TEACHER_TAPS=<dir>). Low view r = RATIO (0.05).
 #   GROUP=kd     kd0 (no teacher: kd_weight 0) and kd_{hard,soft,star}, each a grid kd_weight {0.1, 1} x kd_delta {0.5, 1}
 #   GROUP=alpha  SCOPEID low + full with a learned weight on the low branch: lfa (cat, scalar), lfau (cat, per user),
 #                lfa_sum (z_full + a z_low)
@@ -27,15 +27,16 @@ EXTRA=${EXTRA:-}
 TAGSFX=${TAGSFX:-}
 [ "$SEEDS" != "999" ] && TAGSFX="${TAGSFX}_s3"
 echo "Job $PBS_JOBID on $(hostname), dataset $DS, group $GROUP, ratio $RATIO, seeds $SEEDS, $(date '+%F %T')"
-[ -f "taps/SCOPEID-$DS-es_f/T3.npy" ] || { echo "teacher taps taps/SCOPEID-$DS-es_f missing (run scripts/scopeid.pbs)"; exit 1; }
 source scripts/idssl_common.sh
 
 kd() {
+    T=${TEACHER_TAPS:-taps/SCOPEID-$DS-es_f}
+    [ -f "$T/T3.npy" ] || { echo "teacher taps $T/T3.npy missing: rerun the SCOPEID es_f run with --save_taps=True"; return 1; }
     # shellcheck disable=SC2086
-    run SCOPEKD "es_kd0${TAGSFX}" --low_high_ratio=$RATIO --kd_weight=0.0 --kd_delta=0.5 --kd_wmode=hard --seed="$SEEDS" $EXTRA
+    run SCOPEKD "es_kd0${TAGSFX}" --teacher_taps="../$T" --low_high_ratio=$RATIO --kd_weight=0.0 --kd_delta=0.5 --kd_wmode=hard --seed="$SEEDS" $EXTRA
     for m in hard soft star; do
         # shellcheck disable=SC2086
-        run SCOPEKD "es_kd_${m}${TAGSFX}" --low_high_ratio=$RATIO --kd_wmode=$m \
+        run SCOPEKD "es_kd_${m}${TAGSFX}" --teacher_taps="../$T" --low_high_ratio=$RATIO --kd_wmode=$m \
             --kd_weight="[0.1,1.0]" --kd_delta="[0.5,1.0]" --seed="$SEEDS" $EXTRA
     done
 }
@@ -52,6 +53,8 @@ case "$GROUP" in
   kd) kd ;;
   alpha) alpha ;;
   all) alpha; kd ;;
+  teacher)   # (re)train the Full teacher with taps: SCOPEID single full branch, seed 999
+    run SCOPEID "es_f_teacher" --scope_branches=f --scope_gate=none --scope_item_graph=none --seed=999 ;;
   *) echo "unknown GROUP $GROUP"; exit 1 ;;
 esac
 echo "SCOPEKD done: $DS $GROUP ($(date '+%F %T'))"
