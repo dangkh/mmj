@@ -12,4 +12,5 @@ low_high_ratio: 0.05        # scripts/scopeid.pbs passes 0.03 / 0.05 / 0.10 (SCO
 scope_branches: lf          # lf (low + full) | ff (two full-graph branches) | f | l
 scope_gate: id              # id (gate without the semantic conflict c_u) | none (alpha = 1)
 scope_item_graph: none      # none | text (text kNN item-item graph on the concatenated item representation)
-hyper_parameters: ["scope_branches", "scope_gate", "scope_item_graph", "low_high_ratio"]
+low_alpha_fixed: 1.0         # weight of the low branch when scope_gate = fixed
+hyper_parameters: ["scope_branches", "scope_gate", "scope_item_graph", "low_high_ratio", "low_alpha_fixed"]

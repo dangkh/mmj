@@ -11,7 +11,12 @@
 #   GROUP=kd     kd0 (no teacher: kd_weight 0) and kd_{hard,soft,star}, each a grid kd_weight {0.1, 1} x kd_delta {0.5, 1}
 #   GROUP=alpha  SCOPEID low + full with a learned weight on the low branch: lfa (cat, scalar), lfau (cat, per user),
 #                lfa_sum (z_full + a z_low)
-#   GROUP=all    both
+#   GROUP=alphadiag  diagnostic of the low-branch weight (s = s_full + a s_low), r = RATIO:
+#                lfx    fixed a, grid {0, 0.25, 0.5, 1, 2} selected on valid R@20 (a = 0: full branch alone)
+#                lfab / lfabu   learned, bounded a = 2 sigmoid(theta) in (0, 2) (scalar / per user)
+#                lfa_log        learned, unbounded (as lfa), alpha logged every epoch
+#                lf1_tp / ff_tp lf1 and ff again WITH taps, for the post-hoc score fusion of tools/scope_fusion.py
+#   GROUP=all    alpha + kd
 # Finished runs are skipped. Logs: src/log/{SCOPEKD,SCOPEID}-<DS>-es_*; taps: taps/{SCOPEKD,SCOPEID}-<DS>-es_*/
 #   qsub -v DS=dbbook,GROUP=kd scripts/scopekd.pbs
 #   qsub -v DS=dbbook,GROUP=alpha scripts/scopekd.pbs
@@ -56,7 +61,23 @@ alpha() {
     # shellcheck disable=SC2086
     run SCOPEID "es_lfa_sum_${rt}${TAGSFX}" --scope_branches=lf --scope_gate=alpha   --scope_combine=sum --low_high_ratio=$RATIO --seed="$SEEDS" $EXTRA
 }
+alphadiag() {
+    rt=r$(python -c "print('%02d' % round($RATIO*100))")
+    # shellcheck disable=SC2086
+    run SCOPEID "es_lfx_${rt}${TAGSFX}"     --scope_branches=lf --scope_gate=fixed --low_alpha_fixed="[0.0,0.25,0.5,1.0,2.0]" --low_high_ratio=$RATIO --seed="$SEEDS" $EXTRA
+    # shellcheck disable=SC2086
+    run SCOPEID "es_lfab_${rt}${TAGSFX}"    --scope_branches=lf --scope_gate=alpha_b  --low_high_ratio=$RATIO --seed="$SEEDS" $EXTRA
+    # shellcheck disable=SC2086
+    run SCOPEID "es_lfabu_${rt}${TAGSFX}"   --scope_branches=lf --scope_gate=alpha_bu --low_high_ratio=$RATIO --seed="$SEEDS" $EXTRA
+    # shellcheck disable=SC2086
+    run SCOPEID "es_lfa_log_${rt}${TAGSFX}" --scope_branches=lf --scope_gate=alpha    --low_high_ratio=$RATIO --seed="$SEEDS" $EXTRA
+    # shellcheck disable=SC2086
+    run SCOPEID "es_lf1_${rt}_tp${TAGSFX}"  --scope_branches=lf --scope_gate=none     --low_high_ratio=$RATIO --seed="$SEEDS" $EXTRA
+    # shellcheck disable=SC2086
+    run SCOPEID "es_ff_tp${TAGSFX}"         --scope_branches=ff --scope_gate=none     --seed="$SEEDS" $EXTRA
+}
 case "$GROUP" in
+  alphadiag) alphadiag ;;
   kd) kd ;;
   alpha) alpha ;;
   all) alpha; kd ;;

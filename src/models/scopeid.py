@@ -19,7 +19,10 @@ Removed (needs text / LLM profiles):
 Config (src/configs/model/SCOPEID.yaml; is_multimodal_model False, the text file is read only for 'text'):
   scope_branches : 'lf' (low + full, default) | 'ff' (two full-graph branches) | 'f' | 'l'
   scope_gate     : 'id' (gate without c_u) | 'none' (alpha = 1) | 'alpha' (one learned scalar on the LOW branch)
-                   | 'alpha_u' (one learned scalar per user on the LOW branch)        [only used with 'lf']
+                   | 'alpha_u' (one learned scalar per user on the LOW branch)
+                   | 'alpha_b' / 'alpha_bu' (learned, bounded: alpha = 2 sigmoid(theta) in (0, 2), init 1)
+                   | 'fixed' (alpha = low_alpha_fixed, not learned; alpha = 0 gives the full branch alone)
+                                                                                   [only used with 'lf']
   scope_combine  : 'cat' (SCOPE: concatenation, score = a * s_low + s_full for the alpha gates)
                    | 'sum' (z = z_full + a * z_low for users and items, then dot product)
   scope_item_graph: 'none' | 'text' (text kNN item-item graph, needs t_feat)
@@ -48,7 +51,9 @@ class SCOPEID(GeneralRecommender):
         self.branches = config['scope_branches'] or 'lf'
         self.gate_mode = config['scope_gate'] or 'id'
         self.combine = config['scope_combine'] or 'cat'
-        assert self.gate_mode in ('id', 'none', 'alpha', 'alpha_u') and self.combine in ('cat', 'sum')
+        assert self.gate_mode in ('id', 'none', 'alpha', 'alpha_u', 'alpha_b', 'alpha_bu', 'fixed') \
+            and self.combine in ('cat', 'sum')
+        self.alpha_fixed = float(config['low_alpha_fixed'] if config['low_alpha_fixed'] is not None else 1.0)
         self.item_graph = config['scope_item_graph'] or 'none'
         self.high_ratio = config['low_high_ratio'] if config['low_high_ratio'] is not None else 0.10
         self.pref_reg = 0.003  # hard-coded in SCOPE
@@ -92,9 +97,11 @@ class SCOPEID(GeneralRecommender):
             nn.init.xavier_normal_(self.userW)
         # learned weight of the LOW branch (baseline): one scalar, or one scalar per user; initialised at 1
         self.low_alpha = None
-        if self.branches == 'lf' and self.gate_mode in ('alpha', 'alpha_u'):
-            n = self.num_user if self.gate_mode == 'alpha_u' else 1
-            self.low_alpha = nn.Parameter(torch.ones(n, 1))
+        if self.branches == 'lf' and self.gate_mode in ('alpha', 'alpha_u', 'alpha_b', 'alpha_bu'):
+            n = self.num_user if self.gate_mode in ('alpha_u', 'alpha_bu') else 1
+            # unbounded: alpha itself (init 1); bounded: theta with alpha = 2 sigmoid(theta) (init theta 0 -> alpha 1)
+            init = torch.zeros(n, 1) if self.gate_mode in ('alpha_b', 'alpha_bu') else torch.ones(n, 1)
+            self.low_alpha = nn.Parameter(init)
         assert self.combine == 'cat' or self.branches in ('lf', 'ff'), 'scope_combine=sum needs two branches'
 
         # ---- optional text kNN item-item graph (as in SCOPE) ----
@@ -128,6 +135,24 @@ class SCOPEID(GeneralRecommender):
             h = torch.sparse.mm(self.mm_adj, h)
         return rep + h
 
+    def alpha_value(self):
+        """Weight of the low branch (None when the model has none)."""
+        if self.branches == 'lf' and self.gate_mode == 'fixed':
+            return self.alpha_fixed
+        if self.low_alpha is None:
+            return None
+        if self.gate_mode in ('alpha_b', 'alpha_bu'):
+            return 2.0 * torch.sigmoid(self.low_alpha)
+        return self.low_alpha
+
+    def post_epoch_processing(self):
+        a = self.alpha_value()
+        if not torch.is_tensor(a):
+            return None
+        a = a.detach().flatten()
+        return '[SCOPEID] low-branch alpha: mean {:.3f} | min {:.3f} | max {:.3f}'.format(
+            float(a.mean()), float(a.min()), float(a.max()))
+
     # ---------- forward ----------
     def _compute(self):
         users, items, prefs = {}, {}, {}
@@ -141,11 +166,11 @@ class SCOPEID(GeneralRecommender):
             a = torch.sigmoid(self.out_proj(torch.cat([self.userW, self.gate(g_in)], dim=1)))
             users['full'] = (0.5 + 0.5 * a) * users['full']
 
-        if self.low_alpha is not None:
-            users['low'] = self.low_alpha * users['low']
+        a = self.alpha_value()
+        if a is not None:
+            users['low'] = a * users['low']
             if self.combine == 'sum':
-                items['low'] = self.low_alpha.mean() * items['low'] if self.gate_mode == 'alpha_u' \
-                    else self.low_alpha * items['low']
+                items['low'] = (a.mean() if torch.is_tensor(a) and a.numel() > 1 else a) * items['low']
         if self.combine == 'sum':
             user_rep = sum(users[b] for b in self.branch_names)
             item_rep = sum(items[b] for b in self.branch_names)
